@@ -1,0 +1,15 @@
+/target/
+**/*.rs.bk
+.plan/
+
+# Downloaded by scripts/setup.sh (large, third-party licenses).
+/bin/*
+!/bin/.gitkeep
+/models/*.bin
+/models/*.param
+
+# Generated outputs and the tiny Vulkan smoke image.
+/samples/out/
+/samples/smoke.png
+/samples/*-full.png
+*.partial

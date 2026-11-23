@@ -1,0 +1,20 @@
+{
+  "realesrgan-x4plus": {
+    "scale": 4,
+    "license": "BSD-3-Clause",
+    "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip",
+    "notes": "Baseline Real-ESRGAN photo model. Same family FreeScaler ships."
+  },
+  "4xNomos8kSC": {
+    "scale": 4,
+    "license": "CC-BY-4.0",
+    "source": "https://github.com/upscayl/custom-models/tree/main/models",
+    "notes": "2023 ESRGAN photo model by Philip Hofmann. Trained for JPEG compression and slight blur."
+  },
+  "ultrasharp-4x": {
+    "scale": 4,
+    "license": "CC-BY-NC-SA-4.0",
+    "source": "https://github.com/upscayl/upscayl/tree/main/resources/models",
+    "notes": "Kim2091 UltraSharp. Strong texture recovery. Non-commercial."
+  }
+}
