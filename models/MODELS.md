@@ -166,6 +166,30 @@ The optional DRCT export remains individually selectable with
 `INFSCALER_ONLY=4xNomos2_hq_drct-l`; that does not remove the BROKEN status
 or make the model selectable in InfScaler.
 
+## Face restoration assets
+
+These two files are optional runtime assets, not enhancement models in the
+model picker. `scripts/setup_face_models.sh` downloads them into `models/`.
+
+| Asset | Purpose | License and provenance |
+| --- | --- | --- |
+| `face_detection_yunet.onnx` | YuNet 2023mar, fixed 640×640 input, emits bounding boxes and five landmarks | MIT, copyright Shiqi Yu; distributed by OpenCV Zoo. SHA-256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`. [OpenCV Zoo model card](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) |
+| `RestoreFormerPlusPlus.onnx` | VisoMaster ONNX conversion of RestoreFormer++; one aligned 512×512 crop in, restored RGB crop out | Upstream RestoreFormer++ repository and checkpoint are Apache-2.0. The conversion is from VisoMaster Assets v0.1.0, SHA-256 `e5df99ed4f501be2009ed8e708f407dd26ac400c55a43a01d8c8c157bc475b3f`. [Upstream repository/license](https://github.com/wzhouxiff/RestoreFormerPlusPlus), [ONNX conversion source](https://github.com/visomaster/visomaster-assets/releases/tag/v0.1.0). |
+
+RestoreFormer++ does not expose a fidelity parameter; InfScaler exposes blend
+strength instead. The face path runs after whole-image enhancement and final
+resizing, uses the upscaled YuNet eye landmarks to rotate/align crops, and
+feathers each restored crop into its original coordinates. YuNet can produce
+false positives on animal faces; see bench5 results before relying on Auto for
+an unusual species.
+
+GFPGAN v1.4 is not selected: its repository is Apache-2.0 except for bundled
+third-party code/components, including DFDNet under CC-BY-NC-SA-4.0 and a
+StyleGAN2-derived component under NVIDIA's processor-specific license. The
+CodeFormer checkpoints use the S-Lab non-commercial license. See the upstream
+[GFPGAN license](https://github.com/TencentARC/GFPGAN/blob/master/LICENSE) and
+[CodeFormer repository](https://github.com/sczhou/CodeFormer).
+
 ## Backends
 
 | Binary | File | License | Role |

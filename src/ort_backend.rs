@@ -21,7 +21,7 @@ pub fn thread_count() -> usize {
         .unwrap_or(1)
 }
 
-fn environment() -> Result<&'static ort::environment::Environment> {
+pub(crate) fn environment() -> Result<&'static ort::environment::Environment> {
     static CELL: OnceLock<ort::environment::Environment> = OnceLock::new();
     if let Some(env) = CELL.get() {
         return Ok(env);

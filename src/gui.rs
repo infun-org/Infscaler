@@ -44,6 +44,10 @@ struct InfScalerApp {
     tta: bool,
     keep_size: bool,
     denoise: bool,
+    face_restore: bool,
+    face_strength: f32,
+    fast: bool,
+    fast_ish: bool,
     input_path: String,
     output_path: String,
     input_size: Option<(u32, u32)>,
@@ -81,6 +85,10 @@ impl InfScalerApp {
             tta: false,
             keep_size: false,
             denoise: false,
+            face_restore: true,
+            face_strength: 0.8,
+            fast: false,
+            fast_ish: false,
             input_path: String::new(),
             output_path: String::new(),
             input_size: None,
@@ -118,6 +126,10 @@ impl InfScalerApp {
         };
         let previous = self.models.get(self.model_idx).map(|m| m.name.clone());
         self.models = models::load_models(&root);
+        if previous.is_none() {
+            self.model_idx = self.models.len();
+            return;
+        }
         self.model_idx = previous
             .and_then(|name| self.models.iter().position(|m| m.name == name))
             .filter(|idx| !self.models[*idx].is_broken())
@@ -280,17 +292,21 @@ impl InfScalerApp {
             self.error = "Project folder not found.".into();
             return;
         };
-        let Some(model) = self.selected().cloned() else {
+        let automatic = self.model_idx == self.models.len();
+        let model = self.selected().cloned();
+        if !automatic && model.is_none() {
             self.error = "No model selected. Run scripts/setup.sh.".into();
             return;
-        };
-        if !model.files_present() {
-            self.error = format!(
-                "Model files for {} are missing ({}).",
-                model.name,
-                model.location()
-            );
-            return;
+        }
+        if let Some(model) = model.as_ref().filter(|_| !automatic) {
+            if !model.files_present() {
+                self.error = format!(
+                    "Model files for {} are missing ({}).",
+                    model.name,
+                    model.location()
+                );
+                return;
+            }
         }
         let input = PathBuf::from(self.input_path.trim());
         let output = PathBuf::from(self.output_path.trim());
@@ -317,14 +333,22 @@ impl InfScalerApp {
         let opts = JobOptions {
             input,
             output,
-            model: model.name.clone(),
+            model: model
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "auto".into()),
             output_scale: self.scale,
             tile: self.tile,
-            tta: self.tta && !model.is_onnx(),
+            tta: self.tta && model.as_ref().is_some_and(|m| !m.is_onnx()),
             keep_size: self.keep_size,
             denoise: self.denoise,
             overlap: self.overlap,
             gpu,
+            face_restore: self.face_restore,
+            face_strength: self.face_strength,
+            face_model: "RestoreFormerPlusPlus".into(),
+            fast: self.fast,
+            fast_ish: self.fast_ish,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let pid = Arc::new(AtomicU32::new(0));
@@ -491,20 +515,28 @@ impl InfScalerApp {
         ui.add_space(8.0);
         ui.label("Model");
         let onnx = self.selected().is_some_and(|m| m.is_onnx());
-        let selected_name = self
-            .selected()
-            .map(|m| {
-                if m.is_broken() {
-                    format!("{} · BROKEN · {}×", m.name, m.scale)
-                } else {
-                    format!("{} · {} · {}×", m.name, m.kind().label(), m.scale)
-                }
-            })
-            .unwrap_or_else(|| "none".into());
+        let selected_name = if self.model_idx == self.models.len() {
+            "Auto · choose per image".to_string()
+        } else {
+            self.selected()
+                .map(|m| {
+                    if m.is_broken() {
+                        format!("{} · BROKEN · {}×", m.name, m.scale)
+                    } else {
+                        format!("{} · {} · {}×", m.name, m.kind().label(), m.scale)
+                    }
+                })
+                .unwrap_or_else(|| "none".into())
+        };
         egui::ComboBox::from_id_salt("model")
             .selected_text(selected_name)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.model_idx,
+                    self.models.len(),
+                    "Auto · choose per image",
+                );
                 for (idx, model) in self.models.iter().enumerate() {
                     let label = if model.is_broken() {
                         format!("{} · BROKEN · {}×", model.name, model.scale)
@@ -547,6 +579,13 @@ impl InfScalerApp {
             if !model.source.is_empty() {
                 ui.label(egui::RichText::new(&model.source).weak().size(11.0));
             }
+        }
+        if self.model_idx == self.models.len() {
+            ui.label(
+                egui::RichText::new("People → RealWebPhoto DAT · no faces → Nomos2 OTF")
+                    .weak()
+                    .size(12.0),
+            );
         }
 
         ui.add_space(8.0);
@@ -616,7 +655,7 @@ impl InfScalerApp {
 
         ui.add_space(6.0);
         ui.add_enabled(
-            !self.running && !onnx,
+            !self.running && !onnx && (self.model_idx != self.models.len() || self.fast),
             egui::Checkbox::new(&mut self.tta, "TTA (8 flips, slower)"),
         );
         if onnx {
@@ -637,6 +676,29 @@ impl InfScalerApp {
             !self.running && has_denoise,
             egui::Checkbox::new(&mut self.denoise, "Denoise first (SCUNet)"),
         );
+        ui.add_enabled(
+            !self.running,
+            egui::Checkbox::new(
+                &mut self.face_restore,
+                "Restore detected faces after enhancement",
+            ),
+        );
+        ui.add_enabled_ui(!self.running && self.face_restore, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Face strength");
+                ui.add(egui::Slider::new(&mut self.face_strength, 0.0..=1.0));
+            });
+        });
+        if self.model_idx == self.models.len() {
+            ui.add_enabled(
+                !self.running,
+                egui::Checkbox::new(&mut self.fast, "Fast Auto (Nomos8kSC on GPU)"),
+            );
+            ui.add_enabled(
+                !self.running && !self.fast,
+                egui::Checkbox::new(&mut self.fast_ish, "Fast-ish Auto (Nomos2 OTF for people)"),
+            );
+        }
 
         ui.add_space(8.0);
         ui.label("Save as");
@@ -672,7 +734,8 @@ impl InfScalerApp {
             }
         } else {
             let ready = !self.input_path.trim().is_empty()
-                && self.selected().is_some_and(|model| !model.is_broken());
+                && (self.model_idx == self.models.len()
+                    || self.selected().is_some_and(|model| !model.is_broken()));
             let mut enhance = false;
             ui.add_enabled_ui(ready, |ui| {
                 if ui

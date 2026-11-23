@@ -29,9 +29,29 @@ pub struct Cli {
     #[arg(long)]
     pub output: Option<std::path::PathBuf>,
 
-    /// Model name, matching a models/<name>.param + .bin pair.
-    #[arg(long)]
+    /// Model name or `auto` (faces: DAT, otherwise Nomos2 OTF).
+    #[arg(long, default_value = "auto")]
     pub model: Option<String>,
+
+    /// In Auto mode, choose the fast Nomos8kSC GPU model.
+    #[arg(long)]
+    pub fast: bool,
+
+    /// In Auto mode, use the faster Nomos2 OTF model for detected portraits.
+    #[arg(long)]
+    pub fast_ish: bool,
+
+    /// Face restorer model (default RestoreFormerPlusPlus; ONNX file in models/).
+    #[arg(long, num_args = 0..=1, default_missing_value = "RestoreFormerPlusPlus", default_value = "RestoreFormerPlusPlus")]
+    pub face_restore: Option<String>,
+
+    /// Disable automatic face restoration.
+    #[arg(long)]
+    pub no_face_restore: bool,
+
+    /// Face blend strength, from 0 to 1.
+    #[arg(long, default_value_t = 0.8)]
+    pub face_strength: f32,
 
     /// Run the 8-orientation TTA pass. Much slower.
     #[arg(long)]
@@ -78,10 +98,10 @@ pub fn run(cli: &Cli) -> Result<()> {
         .output
         .clone()
         .ok_or_else(|| anyhow!("--output is required in CLI mode"))?;
-    let model = cli
-        .model
-        .clone()
-        .ok_or_else(|| anyhow!("--model is required in CLI mode"))?;
+    let model = cli.model.clone().unwrap_or_else(|| "auto".into());
+    if !(0.0..=1.0).contains(&cli.face_strength) {
+        return Err(anyhow!("--face-strength must be between 0 and 1"));
+    }
     let root = paths::find_root().context(
         "Could not find the InfScaler project (scripts/setup.sh). Set INFSCALER_HOME or run from the repo.",
     )?;
@@ -97,6 +117,14 @@ pub fn run(cli: &Cli) -> Result<()> {
         denoise: cli.denoise,
         overlap: cli.overlap,
         gpu,
+        face_restore: !cli.no_face_restore,
+        face_strength: cli.face_strength,
+        face_model: cli
+            .face_restore
+            .clone()
+            .unwrap_or_else(|| "RestoreFormerPlusPlus".into()),
+        fast: cli.fast,
+        fast_ish: cli.fast_ish,
     };
 
     let cancel = AtomicBool::new(false);

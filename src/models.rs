@@ -161,6 +161,9 @@ pub fn load_models(root: &Path) -> Vec<ModelInfo> {
                 }
             }
             Some("onnx") => {
+                if stem == "face_detection_yunet" || stem == "RestoreFormerPlusPlus" {
+                    continue;
+                }
                 let ncnn = dir.join(format!("{stem}.param"));
                 // A same-named NCNN pair keeps the Vulkan path. The ONNX file is ignored.
                 if !ncnn.is_file() {

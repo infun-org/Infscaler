@@ -68,6 +68,11 @@ pub struct JobOptions {
     pub denoise: bool,
     pub overlap: u32,
     pub gpu: GpuChoice,
+    pub face_restore: bool,
+    pub face_strength: f32,
+    pub face_model: String,
+    pub fast: bool,
+    pub fast_ish: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -247,13 +252,81 @@ pub fn run_job(
     let (target_w, target_h) = target_size(input_w, input_h, opts.output_scale, opts.keep_size)?;
 
     let loaded = models::load_models(root);
+    let requested_auto = opts.model.eq_ignore_ascii_case("auto");
+    let has_detector = root.join("models/face_detection_yunet.onnx").is_file();
+    if requested_auto && !has_detector {
+        on_event(EngineEvent::Log("Auto face detection unavailable: models/face_detection_yunet.onnx is missing; treating image as no-face".into()));
+    }
+    let detected_input_faces = if (requested_auto || opts.face_restore) && has_detector {
+        let face_started = Instant::now();
+        let source = image::open(&opts.input)?.into_rgba8();
+        let faces = crate::face::detect(&root.join("models/face_detection_yunet.onnx"), &source)?;
+        on_event(EngineEvent::Log(format!(
+            "Face detection: {} face(s)",
+            faces.len()
+        )));
+        on_event(EngineEvent::Log(format!(
+            "Face detection time: {:.2}s",
+            face_started.elapsed().as_secs_f32()
+        )));
+        faces
+    } else {
+        Vec::new()
+    };
+    let selected_name = if requested_auto {
+        let desired = if opts.fast {
+            "4xNomos8kSC"
+        } else if !detected_input_faces.is_empty() && !opts.fast_ish {
+            "4xRealWebPhoto_v4_dat2"
+        } else {
+            "4xNomos2_otf_esrgan"
+        };
+        if loaded
+            .iter()
+            .any(|m| m.name == desired && !m.is_broken() && m.files_present())
+        {
+            desired
+        } else if desired == "4xRealWebPhoto_v4_dat2"
+            && loaded
+                .iter()
+                .any(|m| m.name == "4xNomos2_otf_esrgan" && m.files_present())
+        {
+            "4xNomos2_otf_esrgan"
+        } else if desired == "4xNomos2_otf_esrgan"
+            && loaded
+                .iter()
+                .any(|m| m.name == "4xNomos8kSC" && m.files_present())
+        {
+            "4xNomos8kSC"
+        } else {
+            bail!("Auto mode needs 4xNomos2_otf_esrgan, 4xRealWebPhoto_v4_dat2, or 4xNomos8kSC installed");
+        }
+    } else {
+        opts.model.as_str()
+    };
+    if requested_auto {
+        let choice = format!(
+            "Auto chose {selected_name}{}",
+            if opts.fast {
+                " (Fast)"
+            } else if opts.fast_ish {
+                " (Fast-ish)"
+            } else if detected_input_faces.is_empty() {
+                " (no faces)"
+            } else {
+                " (faces detected)"
+            }
+        );
+        on_event(EngineEvent::Stage(choice.clone()));
+        on_event(EngineEvent::Log(choice));
+    }
     let model = loaded
         .iter()
-        .find(|m| m.name == opts.model)
+        .find(|m| m.name == selected_name)
         .ok_or_else(|| {
             anyhow!(
                 "Model \"{}\" is not in models/ (need a .param + .bin pair, or a .onnx file)",
-                opts.model
+                selected_name
             )
         })?;
     if let Some(reason) = &model.broken_reason {
@@ -324,6 +397,10 @@ pub fn run_job(
         to,
         &mut on_event,
     )?;
+    on_event(EngineEvent::Log(format!(
+        "Enhancement time: {:.2}s",
+        started.elapsed().as_secs_f32()
+    )));
 
     let (native_w, native_h) =
         image::image_dimensions(&temp.0).context("could not read the enhanced image")?;
@@ -332,6 +409,7 @@ pub fn run_job(
     if native_w == target_w && native_h == target_h && matches!(fmt, OutFmt::Png) {
         move_file(&temp.0, &opts.output)?;
     } else {
+        let resize_started = Instant::now();
         if native_w != target_w || native_h != target_h {
             on_event(EngineEvent::Stage(format!(
                 "Lanczos3 resize {native_w}×{native_h} → {target_w}×{target_h}"
@@ -351,6 +429,67 @@ pub fn run_job(
             image
         };
         save_rgba(&image, &opts.output, fmt)?;
+        on_event(EngineEvent::Log(format!(
+            "Resize/save time: {:.2}s",
+            resize_started.elapsed().as_secs_f32()
+        )));
+    }
+
+    if opts.face_restore && opts.face_strength > 0.0 {
+        let detector = root.join("models/face_detection_yunet.onnx");
+        let restorer = root
+            .join("models")
+            .join(format!("{}.onnx", opts.face_model));
+        if !has_detector || !restorer.is_file() {
+            on_event(EngineEvent::Log("Face restore skipped: optional YuNet / RestoreFormer++ ONNX files are missing; run scripts/setup_face_models.sh".into()));
+        } else {
+            on_event(EngineEvent::Stage(
+                "Detecting faces in enhanced image".into(),
+            ));
+            let face_started = Instant::now();
+            let mut image = image::open(&opts.output)?.into_rgba8();
+            let mut faces = crate::face::detect(&detector, &image)?;
+            if faces.is_empty() && !detected_input_faces.is_empty() {
+                // Small/soft faces can score better before upscaling. Reuse
+                // their boxes in final-image coordinates when the second pass
+                // misses them; crop and restore still run on enhanced pixels.
+                let sx = image.width() as f32 / input_w as f32;
+                let sy = image.height() as f32 / input_h as f32;
+                faces = detected_input_faces
+                    .iter()
+                    .map(|f| crate::face::FaceBox {
+                        x: (f.x as f32 * sx) as u32,
+                        y: (f.y as f32 * sy) as u32,
+                        width: (f.width as f32 * sx) as u32,
+                        height: (f.height as f32 * sy) as u32,
+                        angle: f.angle,
+                    })
+                    .collect();
+                on_event(EngineEvent::Log(format!("Using {} upscaled source face box(es) after enhanced-image detector missed them",faces.len())));
+            }
+            on_event(EngineEvent::Log(format!(
+                "Enhanced-image detection: {} face(s), {:.2}s",
+                faces.len(),
+                face_started.elapsed().as_secs_f32()
+            )));
+            if faces.is_empty() {
+                on_event(EngineEvent::Log(
+                    "Face restore skipped: no faces detected".into(),
+                ));
+            } else {
+                on_event(EngineEvent::Stage(format!(
+                    "Restoring {} face(s) with {}",
+                    faces.len(),
+                    opts.face_model
+                )));
+                crate::face::restore(&restorer, &mut image, &faces, opts.face_strength)?;
+                save_rgba(&image, &opts.output, fmt)?;
+                on_event(EngineEvent::Log(format!(
+                    "Face restore/paste time: {:.2}s",
+                    face_started.elapsed().as_secs_f32()
+                )));
+            }
+        }
     }
 
     ort_backend::sample_rss(&peak);
