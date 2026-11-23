@@ -1,3 +1,4 @@
+mod batch;
 mod cli;
 mod engine;
 mod face;
@@ -19,7 +20,7 @@ fn main() {
 
 fn dispatch() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
-    if cli.input.is_some() || cli.list_models {
+    if cli.input.is_some() || cli.input_dir.is_some() || cli.list_models {
         cli::run(&cli)
     } else {
         gui::run().map_err(|err| anyhow!("{err}"))

@@ -30,6 +30,7 @@ pub fn run() -> eframe::Result {
 enum WorkerMsg {
     Event(EngineEvent),
     Finished(Result<RunOutcome, String>),
+    BatchFinished(Result<(), String>),
 }
 
 struct InfScalerApp {
@@ -47,7 +48,6 @@ struct InfScalerApp {
     face_restore: bool,
     face_strength: f32,
     fast: bool,
-    fast_ish: bool,
     input_path: String,
     output_path: String,
     input_size: Option<(u32, u32)>,
@@ -67,6 +67,14 @@ struct InfScalerApp {
     cancel: Option<Arc<AtomicBool>>,
     pid: Option<Arc<AtomicU32>>,
     hovering_file: bool,
+    queued: Vec<PathBuf>,
+    batch_jobs: usize,
+    batch_threads: usize,
+    batch_preset: String,
+    batch_output_dir: Option<PathBuf>,
+    batch_control: Option<Arc<crate::batch::BatchControl>>,
+    zoom: f32,
+    pan: egui::Vec2,
 }
 
 impl InfScalerApp {
@@ -83,12 +91,11 @@ impl InfScalerApp {
             gpu: "auto".into(),
             gpus: Vec::new(),
             tta: false,
-            keep_size: false,
+            keep_size: true,
             denoise: false,
-            face_restore: true,
+            face_restore: false,
             face_strength: 0.8,
             fast: false,
-            fast_ish: false,
             input_path: String::new(),
             output_path: String::new(),
             input_size: None,
@@ -108,6 +115,14 @@ impl InfScalerApp {
             cancel: None,
             pid: None,
             hovering_file: false,
+            queued: Vec::new(),
+            batch_jobs: 1,
+            batch_threads: 4,
+            batch_preset: "general".into(),
+            batch_output_dir: None,
+            batch_control: None,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
         };
         app.reload_models();
         app.spawn_gpu_probe();
@@ -185,6 +200,18 @@ impl InfScalerApp {
                     self.status = text;
                 }
                 Ok(WorkerMsg::Event(EngineEvent::Log(line))) => {
+                    if let Some((done, total)) = line
+                        .split_whitespace()
+                        .next()
+                        .and_then(|ratio| ratio.split_once('/'))
+                    {
+                        if let (Ok(done), Ok(total)) = (done.parse::<f32>(), total.parse::<f32>()) {
+                            if total > 0.0 {
+                                self.progress = done / total * 100.0;
+                                self.status = line.clone();
+                            }
+                        }
+                    }
                     push_log(&mut self.log, &line);
                 }
                 Ok(WorkerMsg::Finished(Ok(outcome))) => {
@@ -215,6 +242,14 @@ impl InfScalerApp {
                     }
                     self.status = "Failed".into();
                     self.error = message;
+                }
+                Ok(WorkerMsg::BatchFinished(result)) => {
+                    self.running = false;
+                    self.batch_control = None;
+                    self.status = match result {
+                        Ok(()) => "Batch complete".into(),
+                        Err(e) => format!("Batch stopped: {e}"),
+                    };
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -348,7 +383,11 @@ impl InfScalerApp {
             face_strength: self.face_strength,
             face_model: "RestoreFormerPlusPlus".into(),
             fast: self.fast,
-            fast_ish: self.fast_ish,
+            preset: if self.fast {
+                "fast".into()
+            } else {
+                self.batch_preset.clone()
+            },
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let pid = Arc::new(AtomicU32::new(0));
@@ -380,6 +419,9 @@ impl InfScalerApp {
     }
 
     fn cancel_job(&mut self) {
+        if let Some(control) = &self.batch_control {
+            control.cancelled.store(true, Ordering::SeqCst);
+        }
         if let Some(flag) = &self.cancel {
             flag.store(true, Ordering::SeqCst);
         }
@@ -392,6 +434,50 @@ impl InfScalerApp {
             }
         }
         self.status = "Cancelling…".into();
+    }
+
+    fn start_batch(&mut self) {
+        let Some(root) = self.root.clone() else {
+            self.error = "Project folder not found.".into();
+            return;
+        };
+        let Some(first) = self.queued.first().cloned() else {
+            return;
+        };
+        let input_dir = first.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let files = self.queued.clone();
+        let control = Arc::new(crate::batch::BatchControl::default());
+        self.batch_control = Some(control.clone());
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.running = true;
+        self.started = Some(Instant::now());
+        self.progress = 0.0;
+        self.error.clear();
+        let opts = crate::batch::BatchOptions {
+            input_dir,
+            input_files: Some(files),
+            output_dir: self.batch_output_dir.clone(),
+            jobs: self.batch_jobs,
+            threads: self.batch_threads,
+            mode: if self.keep_size {
+                crate::batch::OutputMode::Sharpen
+            } else if self.scale == 2 {
+                crate::batch::OutputMode::Upscale2
+            } else {
+                crate::batch::OutputMode::Upscale4
+            },
+            preset: self.batch_preset.clone(),
+        };
+        thread::spawn(move || {
+            let tx_report = tx.clone();
+            let result = crate::batch::run(&root, &opts, control, move |line| {
+                let _ = tx_report.send(WorkerMsg::Event(EngineEvent::Log(line)));
+            });
+            let _ = tx.send(WorkerMsg::BatchFinished(
+                result.map_err(|e| format!("{e:#}")),
+            ));
+        });
     }
 }
 
@@ -407,7 +493,9 @@ impl eframe::App for InfScalerApp {
                 .iter()
                 .filter_map(|file| {
                     let path = file.path();
-                    if engine::is_image_path(path) {
+                    if path.is_dir() {
+                        Some(path.to_path_buf())
+                    } else if engine::is_image_path(path) {
                         Some(path.to_path_buf())
                     } else {
                         None
@@ -415,9 +503,16 @@ impl eframe::App for InfScalerApp {
                 })
                 .collect()
         });
-        if let Some(path) = dropped.into_iter().next() {
+        for path in dropped {
             if !self.running {
-                self.load_input(&ctx, path);
+                if path.is_dir() {
+                    if let Ok(files) = crate::batch::scan_folder(&path) {
+                        self.queued.extend(files);
+                    }
+                } else {
+                    self.queued.push(path.clone());
+                    self.load_input(&ctx, path);
+                }
             }
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) && !self.running {
@@ -501,6 +596,73 @@ impl InfScalerApp {
                     .size(12.0),
             );
         });
+        if ui
+            .button(
+                self.batch_output_dir
+                    .as_ref()
+                    .map(|p| format!("Output: {}", p.display()))
+                    .unwrap_or_else(|| "Output folder: automatic".into()),
+            )
+            .clicked()
+            && !self.running
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Choose output folder")
+                .pick_folder()
+            {
+                self.batch_output_dir = Some(path);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("ONNX threads");
+            ui.add(egui::DragValue::new(&mut self.batch_threads).range(1..=12));
+        });
+        if ui.button("Open folder…").clicked() && !self.running {
+            if let Some(folder) = rfd::FileDialog::new()
+                .set_title("Open image folder")
+                .pick_folder()
+            {
+                if let Ok(files) = crate::batch::scan_folder(&folder) {
+                    self.queued = files;
+                    self.status = format!("Queued {} top-level images", self.queued.len());
+                }
+            }
+        }
+        ui.label(format!("Queue: {} image(s)", self.queued.len()));
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("batch-preset")
+                .selected_text(&self.batch_preset)
+                .show_ui(ui, |ui| {
+                    for p in ["general", "people", "fast"] {
+                        ui.selectable_value(&mut self.batch_preset, p.into(), p);
+                    }
+                });
+            egui::ComboBox::from_id_salt("batch-jobs")
+                .selected_text(format!("{} job(s)", self.batch_jobs))
+                .show_ui(ui, |ui| {
+                    for n in 1..=3 {
+                        ui.selectable_value(&mut self.batch_jobs, n, n.to_string());
+                    }
+                });
+        });
+        if !self.queued.is_empty() {
+            egui::ScrollArea::vertical()
+                .max_height(110.0)
+                .show(ui, |ui| {
+                    for path in self.queued.iter().take(80) {
+                        ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                    }
+                    if self.queued.len() > 80 {
+                        ui.label(format!("… and {} more", self.queued.len() - 80));
+                    }
+                });
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Process queued folder"))
+                .clicked()
+            {
+                self.start_batch();
+            }
+        }
         ui.add_enabled_ui(!self.running, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.input_path)
@@ -669,7 +831,10 @@ impl InfScalerApp {
         }
         ui.add_enabled(
             !self.running,
-            egui::Checkbox::new(&mut self.keep_size, "Keep original size"),
+            egui::Checkbox::new(
+                &mut self.keep_size,
+                "Sharpen at original size (recommended)",
+            ),
         );
         let has_denoise = self.models.iter().any(|m| m.denoise);
         ui.add_enabled(
@@ -693,10 +858,6 @@ impl InfScalerApp {
             ui.add_enabled(
                 !self.running,
                 egui::Checkbox::new(&mut self.fast, "Fast Auto (Nomos8kSC on GPU)"),
-            );
-            ui.add_enabled(
-                !self.running && !self.fast,
-                egui::Checkbox::new(&mut self.fast_ish, "Fast-ish Auto (Nomos2 OTF for people)"),
             );
         }
 
@@ -723,6 +884,12 @@ impl InfScalerApp {
 
         ui.add_space(12.0);
         if self.running {
+            if let Some(control) = &self.batch_control {
+                let paused = control.paused.load(Ordering::SeqCst);
+                if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
+                    control.paused.store(!paused, Ordering::SeqCst);
+                }
+            }
             if ui
                 .add_sized(
                     [ui.available_width(), 36.0],
@@ -792,7 +959,28 @@ impl InfScalerApp {
         };
         let fitted = fit_rect(rect.shrink(16.0), aspect);
 
-        if response.dragged() {
+        if response.double_clicked() {
+            self.zoom = 1.0;
+            self.pan = egui::Vec2::ZERO;
+        }
+        if response.hovered() {
+            let (scroll, pointer) = ui.input(|i| (i.smooth_scroll_delta.y, i.pointer.hover_pos()));
+            if scroll != 0.0 {
+                let old = self.zoom;
+                self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.25, 8.0);
+                if let Some(pos) = pointer {
+                    self.pan += (pos - fitted.center()) * (1.0 - self.zoom / old);
+                }
+            }
+        }
+        let fitted =
+            egui::Rect::from_center_size(fitted.center() + self.pan, fitted.size() * self.zoom);
+
+        if response.dragged_by(egui::PointerButton::Middle)
+            || (response.dragged() && self.zoom > 1.01)
+        {
+            self.pan += response.drag_delta();
+        } else if response.dragged() && self.zoom <= 1.01 {
             if let Some(pos) = response.interact_pointer_pos() {
                 self.split = ((pos.x - fitted.left()) / fitted.width()).clamp(0.02, 0.98);
             }

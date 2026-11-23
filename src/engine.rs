@@ -72,7 +72,7 @@ pub struct JobOptions {
     pub face_strength: f32,
     pub face_model: String,
     pub fast: bool,
-    pub fast_ish: bool,
+    pub preset: String,
 }
 
 #[derive(Debug, Clone)]
@@ -257,7 +257,7 @@ pub fn run_job(
     if requested_auto && !has_detector {
         on_event(EngineEvent::Log("Auto face detection unavailable: models/face_detection_yunet.onnx is missing; treating image as no-face".into()));
     }
-    let detected_input_faces = if (requested_auto || opts.face_restore) && has_detector {
+    let detected_input_faces = if opts.face_restore && has_detector {
         let face_started = Instant::now();
         let source = image::open(&opts.input)?.into_rgba8();
         let faces = crate::face::detect(&root.join("models/face_detection_yunet.onnx"), &source)?;
@@ -274,9 +274,9 @@ pub fn run_job(
         Vec::new()
     };
     let selected_name = if requested_auto {
-        let desired = if opts.fast {
+        let desired = if opts.fast || opts.preset.eq_ignore_ascii_case("fast") {
             "4xNomos8kSC"
-        } else if !detected_input_faces.is_empty() && !opts.fast_ish {
+        } else if opts.preset.eq_ignore_ascii_case("people") {
             "4xRealWebPhoto_v4_dat2"
         } else {
             "4xNomos2_otf_esrgan"
@@ -305,18 +305,7 @@ pub fn run_job(
         opts.model.as_str()
     };
     if requested_auto {
-        let choice = format!(
-            "Auto chose {selected_name}{}",
-            if opts.fast {
-                " (Fast)"
-            } else if opts.fast_ish {
-                " (Fast-ish)"
-            } else if detected_input_faces.is_empty() {
-                " (no faces)"
-            } else {
-                " (faces detected)"
-            }
-        );
+        let choice = format!("Auto chose {selected_name} ({})", opts.preset);
         on_event(EngineEvent::Stage(choice.clone()));
         on_event(EngineEvent::Log(choice));
     }
@@ -383,7 +372,7 @@ pub fn run_job(
         (0.0, 100.0)
     };
     let temp = TempPng(temp_png_path());
-    let backend = run_one(
+    let backend_result = run_one(
         root,
         model,
         &work_input,
@@ -396,7 +385,43 @@ pub fn run_job(
         from,
         to,
         &mut on_event,
-    )?;
+    );
+    let backend = match backend_result {
+        Ok(backend) => backend,
+        Err(err)
+            if format!("{err:#}").contains("NCNN produced an all-black or near-uniform image") =>
+        {
+            let fallback = loaded
+                .iter()
+                .find(|m| m.name == "4xNomos2_otf_esrgan" && m.is_onnx() && m.files_present())
+                .ok_or_else(|| {
+                    anyhow!("{err:#}; ONNX fallback 4xNomos2_otf_esrgan is not installed")
+                })?;
+            on_event(EngineEvent::Stage(
+                "NCNN output was black; retrying with 4xNomos2_otf_esrgan on ONNX Runtime CPU"
+                    .into(),
+            ));
+            on_event(EngineEvent::Log("NCNN output was black or near-uniform. Falling back to Nomos2 OTF on ONNX Runtime CPU.".into()));
+            let _ = std::fs::remove_file(&temp.0);
+            let mut fallback_opts = opts.clone();
+            fallback_opts.tta = false;
+            run_one(
+                root,
+                fallback,
+                &work_input,
+                &temp.0,
+                &fallback_opts,
+                false,
+                cancel,
+                pid_slot,
+                &peak,
+                from,
+                to,
+                &mut on_event,
+            )?
+        }
+        Err(err) => return Err(err),
+    };
     on_event(EngineEvent::Log(format!(
         "Enhancement time: {:.2}s",
         started.elapsed().as_secs_f32()
@@ -621,6 +646,9 @@ fn run_one(
             }
             if tail_failed(&tail) {
                 bail!("Upscaler reported an error.\n{tail}");
+            }
+            if is_black_or_near_uniform(output_png)? {
+                bail!("NCNN produced an all-black or near-uniform image; try a different -t / -j configuration. The batch runner can retry with ONNX.");
             }
             Ok(bin.display().to_string())
         }
@@ -937,6 +965,37 @@ pub fn is_image_path(path: &Path) -> bool {
     )
 }
 
+/// Detects the known RADV failure where NCNN exits successfully but writes a
+/// black or almost constant image. Samples a bounded grid to avoid decoding
+/// large output images into an additional full-size buffer.
+pub fn is_black_or_near_uniform(path: &Path) -> Result<bool> {
+    let image =
+        image::open(path).with_context(|| format!("could not inspect {}", path.display()))?;
+    let rgb = image.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if w == 0 || h == 0 {
+        return Ok(true);
+    }
+    let mut min = [255u8; 3];
+    let mut max = [0u8; 3];
+    let mut sums = [0u64; 3];
+    let mut count = 0u64;
+    for gy in 0..32 {
+        for gx in 0..32 {
+            let p = rgb.get_pixel(((gx * w) / 32).min(w - 1), ((gy * h) / 32).min(h - 1));
+            for c in 0..3 {
+                min[c] = min[c].min(p[c]);
+                max[c] = max[c].max(p[c]);
+                sums[c] += p[c] as u64;
+            }
+            count += 1;
+        }
+    }
+    let mean = (sums[0] + sums[1] + sums[2]) as f32 / (count * 3) as f32;
+    let spread = (0..3).map(|c| max[c] - min[c]).max().unwrap_or(0);
+    Ok(mean < 1.5 || spread < 3)
+}
+
 pub fn default_output_path(input: &Path) -> PathBuf {
     let stem = input
         .file_stem()
@@ -964,7 +1023,28 @@ mod tests {
     fn target_sizes() {
         assert_eq!(target_size(320, 200, 4, false).unwrap(), (1280, 800));
         assert_eq!(target_size(320, 200, 4, true).unwrap(), (320, 200));
+        assert_eq!(target_size(320, 200, 2, false).unwrap(), (640, 400));
         assert!(target_size(10, 10, 1, false).is_err());
+    }
+
+    #[test]
+    fn detects_black_and_near_uniform_ncnn_outputs() {
+        let path = std::env::temp_dir().join(format!("infscaler-black-{}.png", std::process::id()));
+        image::RgbImage::from_pixel(12, 12, image::Rgb([0, 0, 0]))
+            .save(&path)
+            .unwrap();
+        assert!(is_black_or_near_uniform(&path).unwrap());
+        image::RgbImage::from_pixel(12, 12, image::Rgb([90, 90, 90]))
+            .save(&path)
+            .unwrap();
+        assert!(is_black_or_near_uniform(&path).unwrap());
+        image::RgbImage::from_fn(12, 12, |x, y| {
+            image::Rgb([(x * 19) as u8, (y * 17) as u8, ((x + y) * 11) as u8])
+        })
+        .save(&path)
+        .unwrap();
+        assert!(!is_black_or_near_uniform(&path).unwrap());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

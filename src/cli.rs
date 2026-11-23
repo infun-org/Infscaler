@@ -21,6 +21,19 @@ infscaler --input photo.jpg --output out.png --model 4xNomos8kSC\n  \
 infscaler --input photo.jpg --output same.png --model 4xNomos2_otf_esrgan --keep-size --denoise"
 )]
 pub struct Cli {
+    /// Process supported images in this folder (top level only).
+    #[arg(long)]
+    pub input_dir: Option<std::path::PathBuf>,
+    #[arg(long)]
+    pub output_dir: Option<std::path::PathBuf>,
+    #[arg(long, default_value_t = 1)]
+    pub jobs: usize,
+    #[arg(long, default_value_t = 4)]
+    pub threads: usize,
+    #[arg(long, default_value = "sharpen")]
+    pub mode: String,
+    #[arg(long, default_value = "general")]
+    pub preset: String,
     /// Input photo. If omitted, open the GUI.
     #[arg(long)]
     pub input: Option<std::path::PathBuf>,
@@ -29,7 +42,7 @@ pub struct Cli {
     #[arg(long)]
     pub output: Option<std::path::PathBuf>,
 
-    /// Model name or `auto` (faces: DAT, otherwise Nomos2 OTF).
+    /// Model name or `auto` (selection follows --preset).
     #[arg(long, default_value = "auto")]
     pub model: Option<String>,
 
@@ -37,12 +50,8 @@ pub struct Cli {
     #[arg(long)]
     pub fast: bool,
 
-    /// In Auto mode, use the faster Nomos2 OTF model for detected portraits.
-    #[arg(long)]
-    pub fast_ish: bool,
-
     /// Face restorer model (default RestoreFormerPlusPlus; ONNX file in models/).
-    #[arg(long, num_args = 0..=1, default_missing_value = "RestoreFormerPlusPlus", default_value = "RestoreFormerPlusPlus")]
+    #[arg(long, num_args = 0..=1, default_missing_value = "RestoreFormerPlusPlus")]
     pub face_restore: Option<String>,
 
     /// Disable automatic face restoration.
@@ -87,6 +96,41 @@ pub struct Cli {
 }
 
 pub fn run(cli: &Cli) -> Result<()> {
+    if let Some(input_dir) = &cli.input_dir {
+        let mode = match cli.mode.as_str() {
+            "sharpen" => crate::batch::OutputMode::Sharpen,
+            "upscale2" => crate::batch::OutputMode::Upscale2,
+            "upscale4" => crate::batch::OutputMode::Upscale4,
+            other => {
+                return Err(anyhow!(
+                    "--mode must be sharpen, upscale2, or upscale4 (got {other})"
+                ))
+            }
+        };
+        if !(1..=3).contains(&cli.jobs) {
+            return Err(anyhow!("--jobs must be 1, 2, or 3"));
+        }
+        if !matches!(cli.preset.as_str(), "people" | "general" | "fast") {
+            return Err(anyhow!("--preset must be people, general, or fast"));
+        }
+        let root = paths::find_root().context("Could not find the InfScaler project (scripts/setup.sh). Set INFSCALER_HOME or run from the repo.")?;
+        let control = std::sync::Arc::new(crate::batch::BatchControl::default());
+        crate::batch::run(
+            &root,
+            &crate::batch::BatchOptions {
+                input_dir: input_dir.clone(),
+                input_files: None,
+                output_dir: cli.output_dir.clone(),
+                jobs: cli.jobs,
+                threads: cli.threads,
+                mode,
+                preset: cli.preset.clone(),
+            },
+            control,
+            |line| eprintln!("{line}"),
+        )?;
+        return Ok(());
+    }
     if cli.list_models {
         return print_models();
     }
@@ -99,6 +143,9 @@ pub fn run(cli: &Cli) -> Result<()> {
         .clone()
         .ok_or_else(|| anyhow!("--output is required in CLI mode"))?;
     let model = cli.model.clone().unwrap_or_else(|| "auto".into());
+    if !matches!(cli.mode.as_str(), "sharpen" | "upscale2" | "upscale4") {
+        return Err(anyhow!("--mode must be sharpen, upscale2, or upscale4"));
+    }
     if !(0.0..=1.0).contains(&cli.face_strength) {
         return Err(anyhow!("--face-strength must be between 0 and 1"));
     }
@@ -110,21 +157,25 @@ pub fn run(cli: &Cli) -> Result<()> {
         input: input.clone(),
         output: output.clone(),
         model: model.clone(),
-        output_scale: cli.scale,
+        output_scale: match cli.mode.as_str() {
+            "upscale2" => 2,
+            "upscale4" => 4,
+            _ => cli.scale,
+        },
         tile: cli.tile,
         tta: cli.tta,
-        keep_size: cli.keep_size,
+        keep_size: cli.keep_size || cli.mode == "sharpen",
         denoise: cli.denoise,
         overlap: cli.overlap,
         gpu,
-        face_restore: !cli.no_face_restore,
+        face_restore: cli.face_restore.is_some() && !cli.no_face_restore,
         face_strength: cli.face_strength,
         face_model: cli
             .face_restore
             .clone()
             .unwrap_or_else(|| "RestoreFormerPlusPlus".into()),
         fast: cli.fast,
-        fast_ish: cli.fast_ish,
+        preset: cli.preset.clone(),
     };
 
     let cancel = AtomicBool::new(false);

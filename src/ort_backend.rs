@@ -4,6 +4,7 @@
 //! first tile's output shape, so a 4× network and a 1× denoiser share this path.
 
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -15,10 +16,20 @@ use ort::value::Tensor;
 
 use crate::tile::{self, Accumulator};
 
+static CONFIGURED_THREADS: AtomicUsize = AtomicUsize::new(0);
+
 pub fn thread_count() -> usize {
+    let configured = CONFIGURED_THREADS.load(Ordering::Relaxed);
+    if configured > 0 {
+        return configured;
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+pub fn set_thread_count(threads: usize) {
+    CONFIGURED_THREADS.store(threads.max(1), Ordering::Relaxed);
 }
 
 pub(crate) fn environment() -> Result<&'static ort::environment::Environment> {

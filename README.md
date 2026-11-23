@@ -82,22 +82,21 @@ cargo build --release
 the executable and the current directory until it sees `scripts/setup.sh`.
 If you move the binary, set `INFSCALER_HOME` to the repo root.
 
-The window can open a photo (file dialog or drag and drop), pick a model or **Auto**,
-scale (2×, 3×, 4×), tile size (`0` = auto), overlap, GPU id, TTA, keep-original-size,
-and an optional **Denoise first (SCUNet)** pass. Enhance runs on a background
-thread. The before/after view is a drag slider. Errors are shown under the
-progress bar, with elapsed time.
+The window accepts dropped files and folders, scans only the selected folder's
+top level, and queues supported photos. It offers sharpen-at-original-size,
+2×, and 4× output, presets, 1–3 workers, ONNX thread limits, pause/resume/cancel,
+and a separate output folder. The before/after viewer supports split comparison,
+wheel zoom, drag pan, and double-click fit. Face restoration remains available
+as an opt-in control and is off by default.
 
-Face restoration is enabled by default. YuNet detects faces in the enhanced
-image, aligns each crop using its eye landmarks, restores at 512×512 with
-RestoreFormer++, then pastes it back with a feathered mask. The strength slider
-controls the blend. Install the optional face ONNX files with
+YuNet face detection and RestoreFormer++ restoration are disabled by default.
+Enable face restoration explicitly to align crops using eye landmarks, restore
+at 512×512, and paste back with a feathered mask. Install the optional face ONNX files with
 `scripts/setup_face_models.sh`; when either file is missing, the face step is
 skipped and reported in status. Animal photos without detected faces skip it.
-Auto selects RealWebPhoto DAT for images with faces and Nomos2 OTF otherwise.
-**Fast-ish Auto** selects Nomos2 OTF for portraits, and **Fast Auto** selects
-Nomos8kSC on Vulkan. Manual model selection remains
-available. Status and logs report per-step times and the model Auto chose.
+Auto uses the selected content preset: **People** selects RealWebPhoto DAT,
+**Animals / General** selects Nomos2 OTF, and **Fast** selects Nomos8kSC on
+Vulkan. Manual model selection remains available.
 
 The GPU list is filled from `vulkaninfo`. On this machine that is device 0,
 AMD Radeon 660M. Choosing CPU for an NCNN model fails: upscayl-bin rejects a
@@ -127,25 +126,33 @@ TTA is NCNN-only. The official binary is still installed as a fallback if
 ./target/release/infscaler \
   --input samples/real/portrait.jpg \
   --output samples/out/portrait-auto.png \
-  --model auto \
-  --face-strength 0.7
+  --model auto --preset people --mode sharpen
+
+./target/release/infscaler --input-dir samples/real --jobs 1 --threads 4 \
+  --mode sharpen --preset general
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `--input` | Photo. If omitted, the GUI opens |
+| `--input-dir` | Batch a folder's top level only; accepts jpg/jpeg/png/webp case-insensitively |
+| `--output-dir` | Batch destination; defaults to `<input-folder>_infscaler/` |
+| `--jobs` | Batch workers, 1–3 (default 1) |
+| `--threads` | ONNX intra-op thread budget, split across batch workers (default 4) |
+| `--mode` | `sharpen` (default), `upscale2`, or `upscale4`; all use a 4× model |
+| `--preset` | `people` (DAT), `general` (Nomos2 OTF), or `fast` (Nomos8kSC GPU) |
 | `--output` | `.png`, `.jpg`, or `.webp` |
 | `--model` | File stem in `models/`, or `auto` (default) |
 | `--fast` | In Auto mode, use Nomos8kSC on the Vulkan GPU |
 | `--fast-ish` | In Auto mode, use Nomos2 OTF for portraits |
-| `--face-restore [model]` | Use the optional ONNX face restorer (enabled by default; default model `RestoreFormerPlusPlus`) |
+| `--face-restore [model]` | Opt in to optional ONNX face restoration (default model `RestoreFormerPlusPlus`) |
 | `--no-face-restore` | Disable the face restore step |
 | `--face-strength` | Face paste-back blend from 0 to 1 (default 0.8) |
 | `--scale` | 2, 3, or 4. Default 4. Ignored with `--keep-size` |
 | `--tile` | Tile size. `0` is 128. A graph with a fixed square input (DAT, SCUNet) always uses that size |
 | `--overlap` | ONNX seam overlap in input pixels. Default 16. DAT and SCUNet use at least 48; SPAN at least 32. NCNN ignores it |
 | `--tta` | Eight-orientation test-time augmentation. NCNN only |
-| `--keep-size` | Native model scale, then Lanczos3 back to the original dimensions |
+| `--keep-size` | Legacy alias for sharpen-at-original-size; 4× model, then Lanczos3 to input dimensions |
 | `--denoise` | Run the SCUNet ONNX model first, then the selected model |
 | `--gpu` | `auto` (default) or a device id such as `0`. `cpu` is rejected for NCNN |
 | `--list-models` | Print `name`, backend, scale, role, sha256. No window |
@@ -156,8 +163,12 @@ TTA is NCNN-only. The official binary is still installed as a fallback if
 ./scripts/bench5.sh   # Auto + face pipeline, samples/out/bench5/
 ```
 
-NCNN is started with `-j 1:1:1`, so the integrated GPU does not run two copies
-of the network at once. ONNX Runtime uses all CPU threads inside one process.
+Batch ONNX workers receive the configured thread budget split across workers.
+Outputs land in a different folder, existing outputs are skipped on rerun, and
+failed files are listed in `infscaler-batch.log`. NCNN is currently guarded for
+near-black output; a batch Fast run retries that image with the Nomos2 ONNX model.
+Run `scripts/test_ncnn.sh` on a Vulkan machine to compare NCNN tile/thread/fp16
+variants when diagnosing black output.
 
 ## How a run works
 
