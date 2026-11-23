@@ -5,7 +5,9 @@ InfScaler does not implement a neural network. It runs one of two backends:
 - a prebuilt NCNN-Vulkan binary on a `<name>.param` + `<name>.bin` pair
 - ONNX Runtime on the CPU for a `<name>.onnx` file
 
-The app lists every pair and every ONNX file it finds here. If the same stem
+The app lists every pair and every ONNX file it finds here. A manifest entry
+with `broken_reason` remains visible as BROKEN but cannot be selected or run.
+If the same stem
 has both, the NCNN pair is used. `manifest.json` supplies scale, license,
 source, sha256, and a denoise flag. Otherwise the scale is inferred from
 `2x` / `x2`, `3x` / `x3`, `4x` / `x4` in the name (default 4). A name
@@ -72,9 +74,13 @@ run by ONNX Runtime on the CPU. `scripts/export_models.sh` reproduces the
 export (CPU PyTorch, spandrel, opset 17). Weights and ONNX files are
 gitignored. sha256 below is of the ONNX file.
 
-ONNX tiles are RGB float32 NCHW in 0–1. DAT, DRCT, and SCUNet are forced to a
-64×64 tile: the trace constant-folds window attention, and a 160 px SCUNet
-tile fails at runtime. SPAN and the ESRGAN ONNX accept other tile sizes.
+ONNX tiles are RGB float32 NCHW in 0–1. DAT and SCUNet are exported with a
+fixed 128×128 input and no dynamic axes; the runtime reads the static input
+size, reflect-pads every tile to it, and keeps at least 48 px of overlap with
+a Hann ramp. SPAN and the ESRGAN ONNX stay dynamic; SPAN keeps at least 32 px
+of overlap. SPAN's export mirrors InfScaler's final output clamp, and its
+PyTorch parity check uses a real photo crop because random noise is outside
+the model's useful input distribution.
 
 ## 4xNomos2_otf_esrgan
 
@@ -104,10 +110,10 @@ The author also publishes `4xNomos2_otf_esrgan_fp32_opset17.onnx`. The file in
 | Author | Hongyuan Yu and the SPAN authors |
 | License | Apache-2.0 |
 | Role | Light, faithful 4× photo model |
-| ONNX sha256 | `f28af5716a997e9881b6a0541f1ee07852702370bbc78852da746fea1e14f670` |
+| ONNX sha256 | `966008422ac62fffed2795c662b4f1b10905886ccb0ec7e30b4cd5cebf4e1ac6` |
 | Weights | https://github.com/OpenModelDB/model-hub/releases/download/span/4x-spanx4_ch48.pth |
 | Card | https://openmodeldb.info/models/4x-spanx4-ch48 |
-| Export | spandrel, opset 17, dynamic H/W. Checked at tile 64 and tile 128 |
+| Export | spandrel, opset 17, dynamic H/W. Checks the natural-image 0–1 output range on a real crop and mirrors InfScaler's output clipping. Max abs vs PyTorch on real dog-photo crops: 1.40e-6 at 64, 1.73e-6 at 128 |
 
 ## 4xRealWebPhoto_v4_dat2
 
@@ -119,10 +125,10 @@ The author also publishes `4xNomos2_otf_esrgan_fp32_opset17.onnx`. The file in
 | Author | Philip Hofmann |
 | License | CC-BY-4.0 |
 | Role | JPEG and web-compressed photos |
-| ONNX sha256 | `c602ba42c58c3e5394b52ade953b9e1448f9eff2e2d9bcd061b7b81a84a2d340` |
+| ONNX sha256 | `68be66e0baf7fb1034c0466e62a160a09eb4e561f7f83cc102fb67b997491485` |
 | Weights | https://github.com/Phhofm/models/releases/download/4xRealWebPhoto_v4_dat2/4xRealWebPhoto_v4_dat2.safetensors |
 | Card | https://openmodeldb.info/models/4x-RealWebPhoto-v4-dat2 |
-| Export | spandrel, opset 17. The graph names H/W as dynamic, and the trace also folds spatial asserts, so InfScaler always uses a 64 tile. A 96×96 crop, four 64 tiles, took about 15 s and peaked near 380 MB RSS |
+| Export | spandrel, opset 17, fixed 128×128 input (no dynamic axes). A dynamic trace folded the window mask at 64, so neighbor tiles disagreed with a full-frame forward. The runtime always feeds 128 and reflect-pads the overhang |
 
 The author also publishes `4xRealWebPhoto_v4_dat2_fp32_opset17.onnx`. The file
 in `models/` is the local export.
@@ -137,10 +143,10 @@ in `models/` is the local export.
 | Author | Kai Zhang, Yawei Li, Jingyun Liang, Jiezhang Cao, Yulun Zhang, Hao Tang, Deng-Ping Fan, Radu Timofte, Luc Van Gool |
 | License | Apache-2.0 (SCUNet repository, Copyright 2022 Kai Zhang). The checkpoint is the file the SCUNet README tells you to run |
 | Role | Optional "Denoise first" pre-step. Real-image blind denoise, PSNR checkpoint. Not a scale model |
-| ONNX sha256 | `3767d2ebf20a2f839e7b88349af98e6b23682aac645d911c4dac0d2f4f5f00e8` |
+| ONNX sha256 | `2380d8bfb467f36ef72ff35e50623b0efd68704ba3254a06b8b8ca8b77455ebc` |
 | Weights | https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth |
 | Code | https://github.com/cszn/SCUNet |
-| Export | spandrel, opset 17. A 64 tile runs. A 160 tile fails in the window-attention reshape, because that shape was constant-folded at export. InfScaler forces tile 64 |
+| Export | spandrel, opset 17, fixed 128×128 input. The previous trace matched PyTorch at 64 and at 128 (max abs about 1e-6) and failed a 160 tile inside the window reshape. The runtime now always feeds 128 |
 
 ## 4xNomos2_hq_drct-l
 
@@ -151,13 +157,14 @@ in `models/` is the local export.
 | Architecture | DRCT-L |
 | Author | Philip Hofmann |
 | License | CC-BY-4.0 |
-| Role | Large photo model. Included because a 64 tile fits: a 96×96 crop peaked at about 450 MB RSS and finished in about 12 s |
-| ONNX sha256 | `1491656456a1c231643fdb178c9d0261e5742be119f71dd33eb0333c84655d26` |
+| Role | BROKEN / disabled. Fixed 128×128 tiled output still shows a severe square grid |
+| ONNX sha256 | `3dde58973980e979d5c5e37f6b5997dd315dbde4e21ad1cab18636c836c4faee` |
 | Weights | https://github.com/Phhofm/models/releases/download/4xNomos2_hq_drct-l/4xNomos2_hq_drct-l.safetensors |
-| Export | spandrel, opset 17. The first combined run skipped it (2.6 GiB free, under the 4 GiB guard). A later `INFSCALER_ONLY=4xNomos2_hq_drct-l` run exported it. Same 64-tile limit as DAT. No author ONNX fallback exists |
+| Export | spandrel, opset 17, fixed 128×128 input. The rebuilt 128-window mask matches PyTorch at max abs 1.07e-6 on a real dog-photo crop. Yet full-photo tiled output has severe square-grid artifacts with 48 px Hann overlap. Wider overlap is prohibitively slow. Full-frame inference has not been validated under the 7 GiB memory cap; a prior DRCT trace reached about 10 GiB. The manifest marks this model BROKEN and the app blocks it |
 
-The guard remains in `scripts/export_models.py` so a low-RAM re-run of every
-model does not start this one. Set `INFSCALER_ONLY` to export it on its own.
+The optional DRCT export remains individually selectable with
+`INFSCALER_ONLY=4xNomos2_hq_drct-l`; that does not remove the BROKEN status
+or make the model selectable in InfScaler.
 
 ## Backends
 

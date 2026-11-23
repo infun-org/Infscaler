@@ -1,4 +1,4 @@
-use std::io::{Write, stderr};
+use std::io::{stderr, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use anyhow::{anyhow, Context, Result};
@@ -135,10 +135,7 @@ pub fn run(cli: &Cli) -> Result<()> {
     );
     println!("time:    {secs:.2}s");
     println!("rss_kb:  {}", outcome.peak_rss_kb);
-    println!(
-        "denoise: {}",
-        if cli.denoise { "on" } else { "off" }
-    );
+    println!("denoise: {}", if cli.denoise { "on" } else { "off" });
     println!("overlap: {}", cli.overlap);
     Ok(())
 }
@@ -159,12 +156,17 @@ fn print_models() -> Result<()> {
             model.sha256.clone()
         };
         println!(
-            "{}\t{}\t{}x\t{}\t{}",
+            "{}\t{}\t{}x\t{}\t{}{}",
             model.name,
             model.kind().label(),
             model.scale,
             if model.denoise { "denoise" } else { "enhance" },
-            sha
+            sha,
+            model
+                .broken_reason
+                .as_deref()
+                .map(|reason| format!("\tBROKEN: {reason}"))
+                .unwrap_or_default()
         );
     }
     Ok(())

@@ -33,7 +33,14 @@ pub struct ModelInfo {
     pub notes: String,
     pub sha256: String,
     pub denoise: bool,
+    pub broken_reason: Option<String>,
     pub files: ModelFiles,
+}
+
+impl ModelInfo {
+    pub fn is_broken(&self) -> bool {
+        self.broken_reason.is_some()
+    }
 }
 
 impl ModelInfo {
@@ -76,6 +83,8 @@ struct ManifestEntry {
     sha256: String,
     #[serde(default)]
     denoise: bool,
+    #[serde(default)]
+    broken_reason: Option<String>,
 }
 
 /// Scale encoded in names such as `ultrasharp-4x`, `4xNomos8kSC`, `model-x2`.
@@ -119,7 +128,9 @@ pub fn cpu_backend_supports(name: &str) -> bool {
 }
 
 pub fn denoise_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
-    models.iter().find(|m| m.denoise && m.files_present())
+    models
+        .iter()
+        .find(|m| m.denoise && !m.is_broken() && m.files_present())
 }
 
 pub fn load_models(root: &Path) -> Vec<ModelInfo> {
@@ -131,10 +142,17 @@ pub fn load_models(root: &Path) -> Vec<ModelInfo> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+        let Some(stem) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
-        let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
         match ext.as_deref() {
             Some("param") => {
                 let bin = dir.join(format!("{stem}.bin"));
@@ -169,6 +187,7 @@ fn inflate(name: &str, files: ModelFiles, meta: Option<&ManifestEntry>) -> Model
             notes: meta.notes.clone(),
             sha256: meta.sha256.clone(),
             denoise: meta.denoise || denoise_name,
+            broken_reason: meta.broken_reason.clone(),
             name: name.to_string(),
             files,
         }
@@ -180,6 +199,7 @@ fn inflate(name: &str, files: ModelFiles, meta: Option<&ManifestEntry>) -> Model
             notes: "Custom model (no manifest entry).".into(),
             sha256: String::new(),
             denoise: denoise_name,
+            broken_reason: None,
             name: name.to_string(),
             files,
         }

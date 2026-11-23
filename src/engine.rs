@@ -108,7 +108,12 @@ impl Drop for TempPng {
     }
 }
 
-pub fn target_size(width: u32, height: u32, output_scale: u32, keep_size: bool) -> Result<(u32, u32)> {
+pub fn target_size(
+    width: u32,
+    height: u32,
+    output_scale: u32,
+    keep_size: bool,
+) -> Result<(u32, u32)> {
     if width == 0 || height == 0 {
         bail!("Image has no pixels");
     }
@@ -147,7 +152,10 @@ pub fn parse_vulkaninfo_summary(text: &str) -> Vec<GpuDevice> {
     let mut name: Option<String> = None;
     let mut kind: Option<String> = None;
 
-    let flush = |out: &mut Vec<GpuDevice>, id: &mut Option<String>, name: &mut Option<String>, kind: &mut Option<String>| {
+    let flush = |out: &mut Vec<GpuDevice>,
+                 id: &mut Option<String>,
+                 name: &mut Option<String>,
+                 kind: &mut Option<String>| {
         let Some(id) = id.take() else { return };
         let name = name.take().unwrap_or_else(|| "Vulkan device".into());
         let kind = kind.take().unwrap_or_default();
@@ -248,8 +256,15 @@ pub fn run_job(
                 opts.model
             )
         })?;
+    if let Some(reason) = &model.broken_reason {
+        bail!("Model \"{}\" is disabled as broken: {reason}", model.name);
+    }
     if !model.files_present() {
-        bail!("Model files for {} are missing ({})", model.name, model.location());
+        bail!(
+            "Model files for {} are missing ({})",
+            model.name,
+            model.location()
+        );
     }
 
     let peak = AtomicU64::new(0);
@@ -260,9 +275,7 @@ pub fn run_job(
     let mut denoise_hold: Option<TempPng> = None;
     if opts.denoise {
         let Some(denoise) = models::denoise_model(&loaded) else {
-            bail!(
-                "Denoise needs a SCUNet ONNX model in models/. Run scripts/export_models.sh."
-            );
+            bail!("Denoise needs a SCUNet ONNX model in models/. Run scripts/export_models.sh.");
         };
         if denoise.name != model.name {
             on_event(EngineEvent::Stage(format!(
@@ -291,7 +304,11 @@ pub fn run_job(
     }
     let _keep_denoise = denoise_hold;
 
-    let (from, to) = if opts.denoise { (45.0, 100.0) } else { (0.0, 100.0) };
+    let (from, to) = if opts.denoise {
+        (45.0, 100.0)
+    } else {
+        (0.0, 100.0)
+    };
     let temp = TempPng(temp_png_path());
     let backend = run_one(
         root,
@@ -308,8 +325,8 @@ pub fn run_job(
         &mut on_event,
     )?;
 
-    let (native_w, native_h) = image::image_dimensions(&temp.0)
-        .context("could not read the enhanced image")?;
+    let (native_w, native_h) =
+        image::image_dimensions(&temp.0).context("could not read the enhanced image")?;
     on_event(EngineEvent::Percent(100.0));
 
     if native_w == target_w && native_h == target_h && matches!(fmt, OutFmt::Png) {
@@ -337,8 +354,8 @@ pub fn run_job(
     }
 
     ort_backend::sample_rss(&peak);
-    let (output_w, output_h) = image::image_dimensions(&opts.output)
-        .context("could not read the saved image")?;
+    let (output_w, output_h) =
+        image::image_dimensions(&opts.output).context("could not read the saved image")?;
     Ok(RunOutcome {
         output: opts.output.clone(),
         elapsed: started.elapsed(),
@@ -370,29 +387,32 @@ fn run_one(
             if tta {
                 bail!("TTA is only implemented for NCNN models. ONNX Runtime runs one pass.");
             }
-            let mut tile = if opts.tile == 0 {
+            let tile = if opts.tile == 0 {
                 tile::auto_tile(&model.name)
             } else {
                 opts.tile
             };
-            if tile::requires_export_tile(&model.name) && tile != 64 {
+            let overlap = opts.overlap.max(tile::min_overlap(&model.name));
+            if overlap != opts.overlap {
                 on_event(EngineEvent::Log(format!(
-                    "{} was exported at 64×64, so this run uses tile 64 (asked for {tile})",
-                    model.name
+                    "{} keeps at least {overlap} px of overlap (asked for {})",
+                    model.name, opts.overlap
                 )));
-                tile = 64;
             }
             let threads = ort_backend::thread_count();
             on_event(EngineEvent::Stage(format!(
-                "{} with {} (ONNX Runtime CPU, {threads} threads, tile {tile}, overlap {})",
-                if model.denoise { "Denoising" } else { "Enhancing" },
+                "{} with {} (ONNX Runtime CPU, {threads} threads, tile {tile}, overlap {overlap})",
+                if model.denoise {
+                    "Denoising"
+                } else {
+                    "Enhancing"
+                },
                 model.name,
-                opts.overlap
             )));
             let image = image::open(input)
                 .with_context(|| format!("could not decode {}", input.display()))?
                 .into_rgba8();
-            let enhanced = ort_backend::enhance(path, &image, tile, opts.overlap, cancel, peak, |p| {
+            let enhanced = ort_backend::enhance(path, &image, tile, overlap, cancel, peak, |p| {
                 on_event(EngineEvent::Percent(map(p)));
             })?;
             enhanced
@@ -411,28 +431,52 @@ fn run_one(
                 );
             }
             if !models.to_string_lossy().contains("models") {
-                bail!("The model folder path must contain \"models\" or upscayl-bin refuses to start");
+                bail!(
+                    "The model folder path must contain \"models\" or upscayl-bin refuses to start"
+                );
             }
-            let args = build_args(kind, input, output_png, &models, &model.name, model.scale, opts, tta)?;
+            let args = build_args(
+                kind,
+                input,
+                output_png,
+                &models,
+                &model.name,
+                model.scale,
+                opts,
+                tta,
+            )?;
             on_event(EngineEvent::Stage(format!(
                 "Upscaling with {} ({})",
                 model.name,
-                bin.file_name().and_then(|s| s.to_str()).unwrap_or("backend")
+                bin.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("backend")
             )));
             on_event(EngineEvent::Log(format!(
                 "$ {} {}",
                 bin.display(),
                 args.iter()
-                    .map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })
+                    .map(|a| if a.contains(' ') {
+                        format!("\"{a}\"")
+                    } else {
+                        a.clone()
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             )));
-            let tail = spawn_and_stream(&bin, &args, root, cancel, pid_slot, peak, &mut |event| {
-                match event {
-                    EngineEvent::Percent(p) => on_event(EngineEvent::Percent(map(p))),
-                    other => on_event(other),
-                }
-            })?;
+            let tail =
+                spawn_and_stream(
+                    &bin,
+                    &args,
+                    root,
+                    cancel,
+                    pid_slot,
+                    peak,
+                    &mut |event| match event {
+                        EngineEvent::Percent(p) => on_event(EngineEvent::Percent(map(p))),
+                        other => on_event(other),
+                    },
+                )?;
             if !output_png.is_file() || std::fs::metadata(output_png)?.len() < 32 {
                 bail!("Upscaler produced no output image.\n{tail}");
             }
@@ -560,7 +604,10 @@ fn spawn_and_stream(
         .spawn()
         .with_context(|| format!("failed to start {}", bin.display()))?;
     pid_slot.store(child.id(), Ordering::SeqCst);
-    let stderr = child.stderr.take().context("upscaler stderr was not piped")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("upscaler stderr was not piped")?;
     let mut reader = BufReader::new(stderr);
     let mut tail = String::new();
     let mut line_buf = Vec::new();
@@ -700,7 +747,8 @@ fn move_file(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     if std::fs::rename(src, dst).is_err() {
-        std::fs::copy(src, dst).with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+        std::fs::copy(src, dst)
+            .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
         let _ = std::fs::remove_file(src);
     }
     Ok(())

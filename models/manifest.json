@@ -22,39 +22,40 @@
     "license": "CC-BY-4.0",
     "source": "https://github.com/Phhofm/models/releases/download/4xNomos2_otf_esrgan/4xNomos2_otf_esrgan.safetensors",
     "sha256": "3c604b8878683b448aaa3a5736386e45e630dff295a38b2b57e8ab29812da90d",
-    "notes": "2024 ESRGAN photo model. Real-ESRGAN on-the-fly JPEG and blur degradation. Exported from the author's safetensors. ONNX exported locally with spandrel (opset 17, dynamic H/W). Graph: input[1,3,height,width]; output[1,3,height,width].",
+    "notes": "2024 ESRGAN photo model. Real-ESRGAN on-the-fly JPEG and blur degradation. Exported from the author's safetensors. ONNX exported locally with spandrel (opset 17, dynamic H/W). Graph: input[1,3,height,width]; output[1,3,height,width]. Real dog-photo crop max abs vs PyTorch: 5.63e-06 at 64, 7.39e-06 at 128.",
     "denoise": false
   },
   "4xRealWebPhoto_v4_dat2": {
     "scale": 4,
     "license": "CC-BY-4.0",
     "source": "https://github.com/Phhofm/models/releases/download/4xRealWebPhoto_v4_dat2/4xRealWebPhoto_v4_dat2.safetensors",
-    "sha256": "c602ba42c58c3e5394b52ade953b9e1448f9eff2e2d9bcd061b7b81a84a2d340",
-    "notes": "2024 DAT-2 model for JPEG and web-compressed photos. ONNX exported locally with spandrel (opset 17, dynamic H/W). Graph: input[1,3,height,width]; output[Addoutput_dim_0,3,height,width].",
+    "sha256": "68be66e0baf7fb1034c0466e62a160a09eb4e561f7f83cc102fb67b997491485",
+    "notes": "2024 DAT-2 model for JPEG and web-compressed photos. Fixed 128\u00d7128 input; the runtime reflect-pads every tile to that size. ONNX exported locally with spandrel (opset 17, fixed 128\u00d7128). Max abs vs PyTorch: 128:1.91e-06. Graph: input[1,3,128,128]; output[1,3,512,512]. Real dog-photo 128 crop max abs vs PyTorch: 5.19e-06.",
     "denoise": false
   },
   "spanx4_ch48": {
     "scale": 4,
     "license": "Apache-2.0",
     "source": "https://github.com/OpenModelDB/model-hub/releases/download/span/4x-spanx4_ch48.pth",
-    "sha256": "f28af5716a997e9881b6a0541f1ee07852702370bbc78852da746fea1e14f670",
-    "notes": "Official SPAN 4x pretrain, 48 channels. Light and faithful. Apache-2.0 from the SPAN release mirrored by OpenModelDB. ONNX exported locally with spandrel (opset 17, dynamic H/W). Graph: input[1,3,height,width]; output[1,3,height,width].",
+    "sha256": "966008422ac62fffed2795c662b4f1b10905886ccb0ec7e30b4cd5cebf4e1ac6",
+    "notes": "Official SPAN 4x pretrain, 48 channels. Apache-2.0 from the SPAN release mirrored by OpenModelDB. ONNX exported locally with spandrel (opset 17, dynamic H/W); export mirrors runtime 0\u20131 output clipping. Checked against PyTorch on real dog-photo crops: max abs 1.40e-06 at 64 and 1.73e-06 at 128.",
     "denoise": false
   },
   "scunet_color_real_psnr": {
     "scale": 1,
     "license": "Apache-2.0",
     "source": "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth",
-    "sha256": "3767d2ebf20a2f839e7b88349af98e6b23682aac645d911c4dac0d2f4f5f00e8",
-    "notes": "SCUNet blind real-image denoiser (PSNR checkpoint). 1x pre-step. Code Apache-2.0; weights from the KAIR v1.0 release. ONNX exported locally with spandrel (opset 17, dynamic H/W). Graph: input[1,3,height,width]; output[1,3,height,width].",
+    "sha256": "2380d8bfb467f36ef72ff35e50623b0efd68704ba3254a06b8b8ca8b77455ebc",
+    "notes": "SCUNet blind real-image denoiser (PSNR checkpoint). 1x pre-step. Code Apache-2.0; weights from the KAIR v1.0 release. Fixed 128\u00d7128 input. ONNX exported locally with spandrel (opset 17, fixed 128\u00d7128). Max abs vs PyTorch: 128:1.37e-06. Graph: input[1,3,128,128]; output[1,3,128,128].",
     "denoise": true
   },
   "4xNomos2_hq_drct-l": {
     "scale": 4,
     "license": "CC-BY-4.0",
     "source": "https://github.com/Phhofm/models/releases/download/4xNomos2_hq_drct-l/4xNomos2_hq_drct-l.safetensors",
-    "sha256": "1491656456a1c231643fdb178c9d0261e5742be119f71dd33eb0333c84655d26",
-    "notes": "Large DRCT-L photo model. Kept only if export and a small tiled run fit in 13 GB. ONNX exported locally with spandrel (opset 17, dynamic H/W). Graph: input[1,3,height,width]; output[Addoutput_dim_0,3,height,width].",
-    "denoise": false
+    "sha256": "3dde58973980e979d5c5e37f6b5997dd315dbde4e21ad1cab18636c836c4faee",
+    "notes": "Large DRCT-L photo model. Disabled after fixed-128 tiled output retained severe square-grid artifacts; 48 px Hann overlap does not make its tile outputs consistent. The rebuilt 128-window-mask export matches PyTorch (max abs 1.07e-06 on a real dog-photo crop). Full-frame inference has not been validated under the 7 GiB service cap; a prior DRCT trace reached about 10 GiB.",
+    "denoise": false,
+    "broken_reason": "Severe square-grid artifacts persist with fixed 128\u00d7128 tiles and 48 px overlap; wider overlap is impractically slow. Full-frame DRCT-L has not been validated under the 7 GiB service cap; a prior DRCT trace reached about 10 GiB. Disabled until a correct low-memory inference path is available."
   }
 }

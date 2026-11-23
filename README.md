@@ -7,8 +7,9 @@ share that window:
   TTA, the same shape as [FreeScaler](https://github.com/TheMurusTeam/FreeScaler).
   This path loads `.param` + `.bin` RRDB models and uses the Radeon 660M.
 - **ONNX Runtime on the CPU**, via the `ort` crate. This is the working CPU
-  path (the NCNN binaries reject `-g -1`) and the way to run SPAN, DAT, DRCT,
-  and SCUNet, which that NCNN binary cannot load. Tiles and overlap are blended
+  path (the NCNN binaries reject `-g -1`) and the way to run SPAN, DAT, and
+  SCUNet, which that NCNN binary cannot load. DRCT-L is listed as BROKEN and
+  disabled because tiled output retains a square grid. Tiles and overlap are blended
   in Rust. The scale comes from the output shape.
 
 Aimed at real photos of people and animals: recovering soft detail matters
@@ -118,8 +119,8 @@ TTA is NCNN-only. The official binary is still installed as a fallback if
 | `--output` | `.png`, `.jpg`, or `.webp` |
 | `--model` | File stem in `models/` |
 | `--scale` | 2, 3, or 4. Default 4. Ignored with `--keep-size` |
-| `--tile` | Tile size. `0` is auto (64 for DAT/DRCT, 192 for SCUNet, else 128) |
-| `--overlap` | ONNX seam overlap in input pixels. Default 16. NCNN ignores it |
+| `--tile` | Tile size. `0` is 128. A graph with a fixed square input (DAT, SCUNet) always uses that size |
+| `--overlap` | ONNX seam overlap in input pixels. Default 16. DAT and SCUNet use at least 48; SPAN at least 32. NCNN ignores it |
 | `--tta` | Eight-orientation test-time augmentation. NCNN only |
 | `--keep-size` | Native model scale, then Lanczos3 back to the original dimensions |
 | `--denoise` | Run the SCUNet ONNX model first, then the selected model |
@@ -138,7 +139,7 @@ of the network at once. ONNX Runtime uses all CPU threads inside one process.
 
 1. The file extension picks the backend. `.param` + `.bin` starts `bin/upscayl-bin` (or `bin/realesrgan-ncnn-vulkan` if that binary is missing and the model is an official Real-ESRGAN name). `.onnx` loads ONNX Runtime.
 2. With `--denoise`, SCUNet runs first into a temporary PNG, then the selected model. If the selected model is already SCUNet, it runs once.
-3. The image is enhanced at the model's native scale. NCNN tiles and TTA are flags on that process (`-t`, `-x`). ONNX tiles are cut in Rust, run as RGB float32 NCHW in 0–1, and blended with a linear ramp across the overlap.
+3. The image is enhanced at the model's native scale. NCNN tiles and TTA are flags on that process (`-t`, `-x`). ONNX tiles are cut in Rust, run as RGB float32 NCHW in 0–1, reflect-padded to the tile, and blended with a Hann ramp across the overlap.
 4. If the requested size is not the native output (another scale, or keep-original-size), InfScaler resizes with Lanczos3.
 5. Progress from the NCNN log, or from finished ONNX tiles, drives the bar. The CLI prints elapsed time and peak `VmHWM`.
 
@@ -147,6 +148,6 @@ of the network at once. ONNX Runtime uses all CPU threads inside one process.
 - No discrete GPU required, but RRDB models are heavy on a 660M. A 320 px photo is seconds to a couple of minutes per model. TTA multiplies that by about eight. Large tiles can exhaust shared memory (`VK_ERROR_OUT_OF_DEVICE_MEMORY`); lower the tile size.
 - Keep-original-size decodes the full 4× image before the Lanczos pass. A big photo can use a lot of RAM on a 13 GB machine.
 - Neither shipped NCNN binary accepts CPU mode (`-g -1`). ONNX Runtime is the CPU path.
-- DAT, DRCT, and SCUNet use a 64 px tile when tile is 0. Those ONNX graphs were traced at 64×64, so a larger tile fails inside window attention. Overlap is 16 px unless you change it.
+- DAT and SCUNet ONNX files use a fixed 128×128 input. The runtime reflect-pads every tile to that size and blends at least 48 px of overlap. DRCT-L is listed as BROKEN and disabled: its fixed-128 tile matches PyTorch, but tiled full-photo output still has severe square-grid artifacts. Wider overlap is too slow, while full-frame inference cannot fit inside the 7 GiB process limit with safe margin.
 - The param path must be shorter than 256 bytes. That is a fixed buffer in the C binary.
 - Real-photo sources and licenses are in `samples/real/SOURCES.md`. Benchmark crops land in `samples/out/bench/compare/`.

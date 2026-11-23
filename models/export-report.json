@@ -5,38 +5,46 @@
     "sha256": "3c604b8878683b448aaa3a5736386e45e630dff295a38b2b57e8ab29812da90d",
     "bytes": 67132625,
     "via": "spandrel",
-    "graph": "input[1,3,height,width]; output[1,3,height,width]"
-  },
-  {
-    "name": "spanx4_ch48",
-    "ok": true,
-    "sha256": "f28af5716a997e9881b6a0541f1ee07852702370bbc78852da746fea1e14f670",
-    "bytes": 1718928,
-    "via": "spandrel",
-    "graph": "input[1,3,height,width]; output[1,3,height,width]"
-  },
-  {
-    "name": "4xRealWebPhoto_v4_dat2",
-    "ok": true,
-    "sha256": "c602ba42c58c3e5394b52ade953b9e1448f9eff2e2d9bcd061b7b81a84a2d340",
-    "bytes": 57635125,
-    "via": "spandrel",
-    "graph": "input[1,3,height,width]; output[Addoutput_dim_0,3,height,width]"
+    "graph": "input[1,3,height,width]; output[1,3,height,width]",
+    "max_abs": "64:5.63e-06, 128:7.39e-06 (real dog-photo crop)"
   },
   {
     "name": "scunet_color_real_psnr",
     "ok": true,
-    "sha256": "3767d2ebf20a2f839e7b88349af98e6b23682aac645d911c4dac0d2f4f5f00e8",
-    "bytes": 74439959,
+    "previous_max_abs": "64:1.311e-06, 128:1.371e-06",
+    "sha256": "2380d8bfb467f36ef72ff35e50623b0efd68704ba3254a06b8b8ca8b77455ebc",
+    "bytes": 78782190,
     "via": "spandrel",
-    "graph": "input[1,3,height,width]; output[1,3,height,width]"
+    "graph": "input[1,3,128,128]; output[1,3,128,128]",
+    "max_abs": "128:1.37e-06"
+  },
+  {
+    "name": "4xRealWebPhoto_v4_dat2",
+    "ok": true,
+    "previous_max_abs": "64:1.729e-06, 128:ERROR Fail: [ONNXRuntimeError] : 1 : FAIL : Non-zero status code returned while running Reshape node. Name:'/layers.0/blocks.2/attn/attns.1/Reshape_13' Status Message: /onnxruntime_src/onnxruntime/core/providers/cpu/tensor/reshape_helper.h:91 onn",
+    "sha256": "68be66e0baf7fb1034c0466e62a160a09eb4e561f7f83cc102fb67b997491485",
+    "bytes": 51322543,
+    "via": "spandrel",
+    "graph": "input[1,3,128,128]; output[1,3,512,512]",
+    "max_abs": "128:5.19e-06 (real dog-photo crop)"
   },
   {
     "name": "4xNomos2_hq_drct-l",
     "ok": true,
-    "sha256": "1491656456a1c231643fdb178c9d0261e5742be119f71dd33eb0333c84655d26",
-    "bytes": 184416067,
+    "sha256": "3dde58973980e979d5c5e37f6b5997dd315dbde4e21ad1cab18636c836c4faee",
+    "bytes": 129373252,
     "via": "spandrel",
-    "graph": "input[1,3,height,width]; output[Addoutput_dim_0,3,height,width]"
+    "graph": "input[1,3,128,128]; output[1,3,512,512]",
+    "max_abs": "128:1.07e-06 (real dog-photo crop)",
+    "disabled": "BROKEN: fixed-128 tiled output retains visible square-grid artifacts"
+  },
+  {
+    "name": "spanx4_ch48",
+    "ok": true,
+    "sha256": "966008422ac62fffed2795c662b4f1b10905886ccb0ec7e30b4cd5cebf4e1ac6",
+    "bytes": 1722123,
+    "via": "spandrel",
+    "graph": "input[1,3,height,width]; output[1,3,height,width]",
+    "max_abs": "64:1.40e-06, 128:1.73e-06 (real dog-photo crops)"
   }
 ]

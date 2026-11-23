@@ -120,13 +120,23 @@ impl InfScalerApp {
         self.models = models::load_models(&root);
         self.model_idx = previous
             .and_then(|name| self.models.iter().position(|m| m.name == name))
-            .or_else(|| self.models.iter().position(|m| m.name == "4xNomos2_otf_esrgan"))
-            .or_else(|| self.models.iter().position(|m| m.name == "4xNomos8kSC"))
+            .filter(|idx| !self.models[*idx].is_broken())
             .or_else(|| {
                 self.models
                     .iter()
-                    .position(|m| m.name == "realesrgan-x4plus")
+                    .position(|m| m.name == "4xNomos2_otf_esrgan" && !m.is_broken())
             })
+            .or_else(|| {
+                self.models
+                    .iter()
+                    .position(|m| m.name == "4xNomos8kSC" && !m.is_broken())
+            })
+            .or_else(|| {
+                self.models
+                    .iter()
+                    .position(|m| m.name == "realesrgan-x4plus" && !m.is_broken())
+            })
+            .or_else(|| self.models.iter().position(|m| !m.is_broken()))
             .unwrap_or(0);
     }
 
@@ -483,21 +493,44 @@ impl InfScalerApp {
         let onnx = self.selected().is_some_and(|m| m.is_onnx());
         let selected_name = self
             .selected()
-            .map(|m| format!("{} · {} · {}×", m.name, m.kind().label(), m.scale))
+            .map(|m| {
+                if m.is_broken() {
+                    format!("{} · BROKEN · {}×", m.name, m.scale)
+                } else {
+                    format!("{} · {} · {}×", m.name, m.kind().label(), m.scale)
+                }
+            })
             .unwrap_or_else(|| "none".into());
         egui::ComboBox::from_id_salt("model")
             .selected_text(selected_name)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
                 for (idx, model) in self.models.iter().enumerate() {
-                    let label = format!("{} · {} · {}×", model.name, model.kind().label(), model.scale);
-                    ui.selectable_value(&mut self.model_idx, idx, label);
+                    let label = if model.is_broken() {
+                        format!("{} · BROKEN · {}×", model.name, model.scale)
+                    } else {
+                        format!(
+                            "{} · {} · {}×",
+                            model.name,
+                            model.kind().label(),
+                            model.scale
+                        )
+                    };
+                    ui.add_enabled_ui(!model.is_broken(), |ui| {
+                        ui.selectable_value(&mut self.model_idx, idx, label);
+                    });
                 }
                 if self.models.is_empty() {
                     ui.label("No .param + .bin or .onnx models in models/");
                 }
             });
         if let Some(model) = self.selected() {
+            if let Some(reason) = &model.broken_reason {
+                ui.label(
+                    egui::RichText::new(format!("BROKEN: {reason}"))
+                        .color(egui::Color32::from_rgb(220, 90, 70)),
+                );
+            }
             ui.label(
                 egui::RichText::new(format!(
                     "{} · {}×  ·  {}",
@@ -543,7 +576,9 @@ impl InfScalerApp {
             ui.label("Tile");
             ui.add_enabled(
                 !self.running,
-                egui::DragValue::new(&mut self.tile).range(0..=1024).speed(16),
+                egui::DragValue::new(&mut self.tile)
+                    .range(0..=1024)
+                    .speed(16),
             );
             ui.label(egui::RichText::new("0 = auto").weak());
         });
@@ -551,13 +586,15 @@ impl InfScalerApp {
             ui.label("Overlap");
             ui.add_enabled(
                 !self.running,
-                egui::DragValue::new(&mut self.overlap).range(0..=256).speed(4),
+                egui::DragValue::new(&mut self.overlap)
+                    .range(0..=256)
+                    .speed(4),
             );
             ui.label(egui::RichText::new("ONNX seams").weak());
         });
         ui.label(
             egui::RichText::new(
-                "NCNN uses the Vulkan tile. ONNX blends overlap on the CPU. DAT, DRCT, and SCUNet stay at 64.",
+                "NCNN uses the Vulkan tile. ONNX blends a Hann ramp on the CPU. DAT, DRCT, and SCUNet use their fixed input size and at least 48 px of overlap.",
             )
             .weak()
             .size(12.0),
@@ -584,9 +621,11 @@ impl InfScalerApp {
         );
         if onnx {
             ui.label(
-                egui::RichText::new("This model runs on the CPU through ONNX Runtime. TTA stays off.")
-                    .weak()
-                    .size(12.0),
+                egui::RichText::new(
+                    "This model runs on the CPU through ONNX Runtime. TTA stays off.",
+                )
+                .weak()
+                .size(12.0),
             );
         }
         ui.add_enabled(
@@ -609,7 +648,10 @@ impl InfScalerApp {
                         .desired_width(ui.available_width() - 78.0),
                 );
             });
-            if ui.add_enabled(!self.running, egui::Button::new("Browse")).clicked() {
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Browse"))
+                .clicked()
+            {
                 self.pick_output();
             }
         });
@@ -629,7 +671,8 @@ impl InfScalerApp {
                 self.cancel_job();
             }
         } else {
-            let ready = !self.input_path.trim().is_empty() && !self.models.is_empty();
+            let ready = !self.input_path.trim().is_empty()
+                && self.selected().is_some_and(|model| !model.is_broken());
             let mut enhance = false;
             ui.add_enabled_ui(ready, |ui| {
                 if ui
@@ -699,18 +742,20 @@ impl InfScalerApp {
                 fitted.min,
                 egui::pos2(fitted.left() + fitted.width() * self.split, fitted.bottom()),
             );
-            painter.with_clip_rect(clip).image(before_id, fitted, uv, egui::Color32::WHITE);
+            painter
+                .with_clip_rect(clip)
+                .image(before_id, fitted, uv, egui::Color32::WHITE);
             let x = fitted.left() + fitted.width() * self.split;
             painter.line_segment(
                 [egui::pos2(x, fitted.top()), egui::pos2(x, fitted.bottom())],
                 egui::Stroke::new(2.0, egui::Color32::WHITE),
             );
-            painter.circle_filled(
-                egui::pos2(x, fitted.center().y),
-                7.0,
-                egui::Color32::WHITE,
+            painter.circle_filled(egui::pos2(x, fitted.center().y), 7.0, egui::Color32::WHITE);
+            paint_tag(
+                &painter,
+                egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
+                "Before",
             );
-            paint_tag(&painter, egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0), "Before");
             paint_tag(
                 &painter,
                 egui::pos2(fitted.right() - 64.0, fitted.top() + 8.0),
@@ -718,7 +763,11 @@ impl InfScalerApp {
             );
         } else {
             painter.image(before_id, fitted, uv, egui::Color32::WHITE);
-            paint_tag(&painter, egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0), "Original");
+            paint_tag(
+                &painter,
+                egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
+                "Original",
+            );
         }
 
         if self.hovering_file {
@@ -800,10 +849,7 @@ fn paint_tag(painter: &egui::Painter, pos: egui::Pos2, text: &str) {
         egui::FontId::proportional(13.0),
         egui::Color32::WHITE,
     );
-    let rect = egui::Rect::from_min_size(
-        pos,
-        galley.size() + egui::vec2(12.0, 6.0),
-    );
+    let rect = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(12.0, 6.0));
     painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(160));
     painter.galley(pos + egui::vec2(6.0, 3.0), galley, egui::Color32::WHITE);
 }

@@ -18,7 +18,7 @@ python -m pip install --upgrade pip
 # Torch and torchvision must come from the same CPU index. A PyPI torchvision
 # wheel does not register torchvision::nms inside the CPU torch build.
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install spandrel spandrel_extra_arches pillow safetensors onnx
+pip install spandrel spandrel_extra_arches pillow safetensors onnx onnxruntime
 # PyPI torchvision sorts above the +cpu local version, so a plain install
 # leaves the mismatched wheel in place. Force the CPU build.
 pip install --force-reinstall --no-deps torchvision==0.29.2+cpu --index-url https://download.pytorch.org/whl/cpu
