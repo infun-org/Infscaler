@@ -18,7 +18,7 @@ With no --input, InfScaler opens the window.\n\
 Examples:\n  \
 infscaler\n  \
 infscaler --input photo.jpg --output out.png --model 4xNomos8kSC\n  \
-infscaler --input photo.jpg --output same.png --model realesrgan-x4plus --keep-size --tile 128"
+infscaler --input photo.jpg --output same.png --model 4xNomos2_otf_esrgan --keep-size --denoise"
 )]
 pub struct Cli {
     /// Input photo. If omitted, open the GUI.
@@ -49,12 +49,27 @@ pub struct Cli {
     #[arg(long, default_value_t = 4)]
     pub scale: u32,
 
-    /// `auto`, or a GPU id (`0`). `cpu` is rejected by the shipped binaries.
+    /// `auto`, a GPU id (`0`), or `cpu`. CPU runs ONNX models. NCNN binaries reject it.
     #[arg(long, default_value = "auto")]
     pub gpu: String,
+
+    /// Run the SCUNet denoiser before the selected model.
+    #[arg(long)]
+    pub denoise: bool,
+
+    /// ONNX tile overlap in input pixels. NCNN ignores this.
+    #[arg(long, default_value_t = 16)]
+    pub overlap: u32,
+
+    /// Print installed models and exit.
+    #[arg(long)]
+    pub list_models: bool,
 }
 
 pub fn run(cli: &Cli) -> Result<()> {
+    if cli.list_models {
+        return print_models();
+    }
     let input = cli
         .input
         .clone()
@@ -79,6 +94,8 @@ pub fn run(cli: &Cli) -> Result<()> {
         tile: cli.tile,
         tta: cli.tta,
         keep_size: cli.keep_size,
+        denoise: cli.denoise,
+        overlap: cli.overlap,
         gpu,
     };
 
@@ -117,5 +134,38 @@ pub fn run(cli: &Cli) -> Result<()> {
         if cli.keep_size { "original size" } else { "no" }
     );
     println!("time:    {secs:.2}s");
+    println!("rss_kb:  {}", outcome.peak_rss_kb);
+    println!(
+        "denoise: {}",
+        if cli.denoise { "on" } else { "off" }
+    );
+    println!("overlap: {}", cli.overlap);
+    Ok(())
+}
+
+fn print_models() -> Result<()> {
+    let root = paths::find_root().context(
+        "Could not find the InfScaler project (scripts/setup.sh). Set INFSCALER_HOME or run from the repo.",
+    )?;
+    let models = crate::models::load_models(&root);
+    if models.is_empty() {
+        println!("(no models)");
+        return Ok(());
+    }
+    for model in models {
+        let sha = if model.sha256.is_empty() {
+            "-".to_string()
+        } else {
+            model.sha256.clone()
+        };
+        println!(
+            "{}\t{}\t{}x\t{}\t{}",
+            model.name,
+            model.kind().label(),
+            model.scale,
+            if model.denoise { "denoise" } else { "enhance" },
+            sha
+        );
+    }
     Ok(())
 }

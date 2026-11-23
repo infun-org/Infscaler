@@ -38,10 +38,12 @@ struct InfScalerApp {
     model_idx: usize,
     scale: u32,
     tile: u32,
+    overlap: u32,
     gpu: String,
     gpus: Vec<GpuDevice>,
     tta: bool,
     keep_size: bool,
+    denoise: bool,
     input_path: String,
     output_path: String,
     input_size: Option<(u32, u32)>,
@@ -73,10 +75,12 @@ impl InfScalerApp {
             model_idx: 0,
             scale: 4,
             tile: 0,
+            overlap: 16,
             gpu: "auto".into(),
             gpus: Vec::new(),
             tta: false,
             keep_size: false,
+            denoise: false,
             input_path: String::new(),
             output_path: String::new(),
             input_size: None,
@@ -116,6 +120,7 @@ impl InfScalerApp {
         self.models = models::load_models(&root);
         self.model_idx = previous
             .and_then(|name| self.models.iter().position(|m| m.name == name))
+            .or_else(|| self.models.iter().position(|m| m.name == "4xNomos2_otf_esrgan"))
             .or_else(|| self.models.iter().position(|m| m.name == "4xNomos8kSC"))
             .or_else(|| {
                 self.models
@@ -269,12 +274,11 @@ impl InfScalerApp {
             self.error = "No model selected. Run scripts/setup.sh.".into();
             return;
         };
-        if !model.param.is_file() || !model.bin.is_file() {
+        if !model.files_present() {
             self.error = format!(
-                "Model files for {} are missing ({} / {}).",
+                "Model files for {} are missing ({}).",
                 model.name,
-                model.param.display(),
-                model.bin.display()
+                model.location()
             );
             return;
         }
@@ -303,11 +307,13 @@ impl InfScalerApp {
         let opts = JobOptions {
             input,
             output,
-            model: model.name,
+            model: model.name.clone(),
             output_scale: self.scale,
             tile: self.tile,
-            tta: self.tta,
+            tta: self.tta && !model.is_onnx(),
             keep_size: self.keep_size,
+            denoise: self.denoise,
+            overlap: self.overlap,
             gpu,
         };
         let cancel = Arc::new(AtomicBool::new(false));
@@ -474,26 +480,33 @@ impl InfScalerApp {
 
         ui.add_space(8.0);
         ui.label("Model");
+        let onnx = self.selected().is_some_and(|m| m.is_onnx());
         let selected_name = self
             .selected()
-            .map(|m| m.name.clone())
+            .map(|m| format!("{} · {} · {}×", m.name, m.kind().label(), m.scale))
             .unwrap_or_else(|| "none".into());
         egui::ComboBox::from_id_salt("model")
             .selected_text(selected_name)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
                 for (idx, model) in self.models.iter().enumerate() {
-                    ui.selectable_value(&mut self.model_idx, idx, &model.name);
+                    let label = format!("{} · {} · {}×", model.name, model.kind().label(), model.scale);
+                    ui.selectable_value(&mut self.model_idx, idx, label);
                 }
                 if self.models.is_empty() {
-                    ui.label("No .param + .bin pairs in models/");
+                    ui.label("No .param + .bin or .onnx models in models/");
                 }
             });
         if let Some(model) = self.selected() {
             ui.label(
-                egui::RichText::new(format!("{}×  ·  {}", model.scale, model.license))
-                    .weak()
-                    .size(12.0),
+                egui::RichText::new(format!(
+                    "{} · {}×  ·  {}",
+                    model.kind().label(),
+                    model.scale,
+                    model.license
+                ))
+                .weak()
+                .size(12.0),
             );
             if !model.notes.is_empty() {
                 ui.label(egui::RichText::new(&model.notes).weak().size(12.0));
@@ -534,10 +547,20 @@ impl InfScalerApp {
             );
             ui.label(egui::RichText::new("0 = auto").weak());
         });
+        ui.horizontal(|ui| {
+            ui.label("Overlap");
+            ui.add_enabled(
+                !self.running,
+                egui::DragValue::new(&mut self.overlap).range(0..=256).speed(4),
+            );
+            ui.label(egui::RichText::new("ONNX seams").weak());
+        });
         ui.label(
-            egui::RichText::new("On the Radeon 660M, try 64 or 128 if auto runs out of memory.")
-                .weak()
-                .size(12.0),
+            egui::RichText::new(
+                "NCNN uses the Vulkan tile. ONNX blends overlap on the CPU. DAT, DRCT, and SCUNet stay at 64.",
+            )
+            .weak()
+            .size(12.0),
         );
 
         ui.add_space(8.0);
@@ -551,14 +574,29 @@ impl InfScalerApp {
                 for device in &self.gpus {
                     ui.selectable_value(&mut self.gpu, device.id.clone(), &device.label);
                 }
-                ui.label("CPU: not supported (both binaries reject -g -1)");
+                ui.label("CPU runs ONNX models. NCNN binaries reject -g -1.");
             });
 
         ui.add_space(6.0);
-        ui.add_enabled(!self.running, egui::Checkbox::new(&mut self.tta, "TTA (8 flips, slower)"));
+        ui.add_enabled(
+            !self.running && !onnx,
+            egui::Checkbox::new(&mut self.tta, "TTA (8 flips, slower)"),
+        );
+        if onnx {
+            ui.label(
+                egui::RichText::new("This model runs on the CPU through ONNX Runtime. TTA stays off.")
+                    .weak()
+                    .size(12.0),
+            );
+        }
         ui.add_enabled(
             !self.running,
             egui::Checkbox::new(&mut self.keep_size, "Keep original size"),
+        );
+        let has_denoise = self.models.iter().any(|m| m.denoise);
+        ui.add_enabled(
+            !self.running && has_denoise,
+            egui::Checkbox::new(&mut self.denoise, "Denoise first (SCUNet)"),
         );
 
         ui.add_space(8.0);

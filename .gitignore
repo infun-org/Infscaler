@@ -7,6 +7,11 @@
 !/bin/.gitkeep
 /models/*.bin
 /models/*.param
+/models/*.onnx
+/models/weights/
+.venv/
+__pycache__/
+*.pyc
 
 # Generated outputs and the tiny Vulkan smoke image.
 /samples/out/

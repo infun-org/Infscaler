@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -9,8 +9,10 @@ use image::buffer::ConvertBuffer;
 use image::codecs::jpeg::JpegEncoder;
 use image::ExtendedColorType;
 
-use crate::models::cpu_backend_supports;
+use crate::models::{self, cpu_backend_supports, ModelFiles, ModelInfo};
+use crate::ort_backend;
 use crate::paths;
+use crate::tile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuChoice {
@@ -63,6 +65,8 @@ pub struct JobOptions {
     pub tile: u32,
     pub tta: bool,
     pub keep_size: bool,
+    pub denoise: bool,
+    pub overlap: u32,
     pub gpu: GpuChoice,
 }
 
@@ -73,6 +77,7 @@ pub struct RunOutcome {
     pub input_size: (u32, u32),
     pub output_size: (u32, u32),
     pub backend: String,
+    pub peak_rss_kb: u64,
 }
 
 #[derive(Debug)]
@@ -233,55 +238,78 @@ pub fn run_job(
         .with_context(|| format!("could not read {}", opts.input.display()))?;
     let (target_w, target_h) = target_size(input_w, input_h, opts.output_scale, opts.keep_size)?;
 
-    let model = crate::models::load_models(root)
-        .into_iter()
+    let loaded = models::load_models(root);
+    let model = loaded
+        .iter()
         .find(|m| m.name == opts.model)
-        .ok_or_else(|| anyhow!("Model \"{}\" is not in models/ (need a .param and .bin pair)", opts.model))?;
-
-    let (bin, kind) = select_backend(root, opts.gpu, &model.name)?;
-    let models = paths::models_dir(root);
-    // upscayl-bin sprintf's the param path into a 256-byte stack buffer.
-    let param_path = models.join(format!("{}.param", model.name));
-    if param_path.as_os_str().len() >= 250 {
-        bail!(
-            "Model path is too long for the upscaler (256-byte buffer): {}",
-            param_path.display()
-        );
-    }
-    if !models.to_string_lossy().contains("models") {
-        bail!("The model folder path must contain \"models\" or upscayl-bin refuses to start");
+        .ok_or_else(|| {
+            anyhow!(
+                "Model \"{}\" is not in models/ (need a .param + .bin pair, or a .onnx file)",
+                opts.model
+            )
+        })?;
+    if !model.files_present() {
+        bail!("Model files for {} are missing ({})", model.name, model.location());
     }
 
-    let temp = TempPng(temp_png_path());
-    let args = build_args(kind, &opts.input, &temp.0, &models, &model.name, model.scale, opts)?;
-    on_event(EngineEvent::Stage(format!(
-        "Upscaling with {} ({})",
-        model.name,
-        bin.file_name().and_then(|s| s.to_str()).unwrap_or("backend")
-    )));
-    on_event(EngineEvent::Log(format!(
-        "$ {} {}",
-        bin.display(),
-        args.iter()
-            .map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })
-            .collect::<Vec<_>>()
-            .join(" ")
-    )));
-
+    let peak = AtomicU64::new(0);
+    ort_backend::sample_rss(&peak);
     let started = Instant::now();
-    let tail = spawn_and_stream(&bin, &args, root, cancel, pid_slot, &mut on_event)?;
-    if cancel.load(Ordering::SeqCst) {
-        bail!("Cancelled");
+
+    let mut work_input = opts.input.clone();
+    let mut denoise_hold: Option<TempPng> = None;
+    if opts.denoise {
+        let Some(denoise) = models::denoise_model(&loaded) else {
+            bail!(
+                "Denoise needs a SCUNet ONNX model in models/. Run scripts/export_models.sh."
+            );
+        };
+        if denoise.name != model.name {
+            on_event(EngineEvent::Stage(format!(
+                "Denoising with {} ({})",
+                denoise.name,
+                denoise.kind().label()
+            )));
+            let tmp = TempPng(temp_png_path());
+            run_one(
+                root,
+                denoise,
+                &work_input,
+                &tmp.0,
+                opts,
+                false,
+                cancel,
+                pid_slot,
+                &peak,
+                0.0,
+                45.0,
+                &mut on_event,
+            )?;
+            work_input = tmp.0.clone();
+            denoise_hold = Some(tmp);
+        }
     }
-    if !temp.0.is_file() || std::fs::metadata(&temp.0)?.len() < 32 {
-        bail!("Upscaler produced no output image.\n{tail}");
-    }
-    if tail_failed(&tail) {
-        bail!("Upscaler reported an error.\n{tail}");
-    }
+    let _keep_denoise = denoise_hold;
+
+    let (from, to) = if opts.denoise { (45.0, 100.0) } else { (0.0, 100.0) };
+    let temp = TempPng(temp_png_path());
+    let backend = run_one(
+        root,
+        model,
+        &work_input,
+        &temp.0,
+        opts,
+        opts.tta,
+        cancel,
+        pid_slot,
+        &peak,
+        from,
+        to,
+        &mut on_event,
+    )?;
 
     let (native_w, native_h) = image::image_dimensions(&temp.0)
-        .context("could not read the upscaler output")?;
+        .context("could not read the enhanced image")?;
     on_event(EngineEvent::Percent(100.0));
 
     if native_w == target_w && native_h == target_h && matches!(fmt, OutFmt::Png) {
@@ -308,6 +336,7 @@ pub fn run_job(
         save_rgba(&image, &opts.output, fmt)?;
     }
 
+    ort_backend::sample_rss(&peak);
     let (output_w, output_h) = image::image_dimensions(&opts.output)
         .context("could not read the saved image")?;
     Ok(RunOutcome {
@@ -315,8 +344,104 @@ pub fn run_job(
         elapsed: started.elapsed(),
         input_size: (input_w, input_h),
         output_size: (output_w, output_h),
-        backend: bin.display().to_string(),
+        backend,
+        peak_rss_kb: peak.load(Ordering::Relaxed),
     })
+}
+
+fn run_one(
+    root: &Path,
+    model: &ModelInfo,
+    input: &Path,
+    output_png: &Path,
+    opts: &JobOptions,
+    tta: bool,
+    cancel: &AtomicBool,
+    pid_slot: &AtomicU32,
+    peak: &AtomicU64,
+    percent_from: f32,
+    percent_to: f32,
+    on_event: &mut impl FnMut(EngineEvent),
+) -> Result<String> {
+    let span = percent_to - percent_from;
+    let map = |p: f32| percent_from + span * (p.clamp(0.0, 100.0) / 100.0);
+    match &model.files {
+        ModelFiles::Onnx { path } => {
+            if tta {
+                bail!("TTA is only implemented for NCNN models. ONNX Runtime runs one pass.");
+            }
+            let mut tile = if opts.tile == 0 {
+                tile::auto_tile(&model.name)
+            } else {
+                opts.tile
+            };
+            if tile::requires_export_tile(&model.name) && tile != 64 {
+                on_event(EngineEvent::Log(format!(
+                    "{} was exported at 64×64, so this run uses tile 64 (asked for {tile})",
+                    model.name
+                )));
+                tile = 64;
+            }
+            let threads = ort_backend::thread_count();
+            on_event(EngineEvent::Stage(format!(
+                "{} with {} (ONNX Runtime CPU, {threads} threads, tile {tile}, overlap {})",
+                if model.denoise { "Denoising" } else { "Enhancing" },
+                model.name,
+                opts.overlap
+            )));
+            let image = image::open(input)
+                .with_context(|| format!("could not decode {}", input.display()))?
+                .into_rgba8();
+            let enhanced = ort_backend::enhance(path, &image, tile, opts.overlap, cancel, peak, |p| {
+                on_event(EngineEvent::Percent(map(p)));
+            })?;
+            enhanced
+                .save(output_png)
+                .with_context(|| format!("save {}", output_png.display()))?;
+            Ok(format!("onnxruntime-cpu ({threads} threads)"))
+        }
+        ModelFiles::Ncnn { .. } => {
+            let (bin, kind) = select_backend(root, opts.gpu, &model.name)?;
+            let models = paths::models_dir(root);
+            let param_path = models.join(format!("{}.param", model.name));
+            if param_path.as_os_str().len() >= 250 {
+                bail!(
+                    "Model path is too long for the upscaler (256-byte buffer): {}",
+                    param_path.display()
+                );
+            }
+            if !models.to_string_lossy().contains("models") {
+                bail!("The model folder path must contain \"models\" or upscayl-bin refuses to start");
+            }
+            let args = build_args(kind, input, output_png, &models, &model.name, model.scale, opts, tta)?;
+            on_event(EngineEvent::Stage(format!(
+                "Upscaling with {} ({})",
+                model.name,
+                bin.file_name().and_then(|s| s.to_str()).unwrap_or("backend")
+            )));
+            on_event(EngineEvent::Log(format!(
+                "$ {} {}",
+                bin.display(),
+                args.iter()
+                    .map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )));
+            let tail = spawn_and_stream(&bin, &args, root, cancel, pid_slot, peak, &mut |event| {
+                match event {
+                    EngineEvent::Percent(p) => on_event(EngineEvent::Percent(map(p))),
+                    other => on_event(other),
+                }
+            })?;
+            if !output_png.is_file() || std::fs::metadata(output_png)?.len() < 32 {
+                bail!("Upscaler produced no output image.\n{tail}");
+            }
+            if tail_failed(&tail) {
+                bail!("Upscaler reported an error.\n{tail}");
+            }
+            Ok(bin.display().to_string())
+        }
+    }
 }
 
 fn select_backend(root: &Path, gpu: GpuChoice, model: &str) -> Result<(PathBuf, BackendKind)> {
@@ -357,6 +482,7 @@ fn build_args(
     model: &str,
     model_scale: u32,
     opts: &JobOptions,
+    tta: bool,
 ) -> Result<Vec<String>> {
     let mut args = vec![
         "-i".into(),
@@ -405,7 +531,7 @@ fn build_args(
             }
         }
     }
-    if opts.tta {
+    if tta {
         args.push("-x".into());
     }
     Ok(args)
@@ -417,6 +543,7 @@ fn spawn_and_stream(
     root: &Path,
     cancel: &AtomicBool,
     pid_slot: &AtomicU32,
+    peak: &AtomicU64,
     on_event: &mut impl FnMut(EngineEvent),
 ) -> Result<String> {
     let mut cmd = Command::new(bin);
@@ -459,6 +586,10 @@ fn spawn_and_stream(
                 continue;
             }
             push_tail(&mut tail, piece);
+            if let Some(kb) = ort_backend::vm_hwm_kb(child.id()) {
+                peak.fetch_max(kb, Ordering::Relaxed);
+            }
+            ort_backend::sample_rss(peak);
             if let Some(percent) = parse_percent(piece) {
                 on_event(EngineEvent::Percent(percent));
             } else {

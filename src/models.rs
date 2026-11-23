@@ -3,6 +3,27 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Ncnn,
+    Onnx,
+}
+
+impl BackendKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ncnn => "NCNN",
+            Self::Onnx => "ONNX",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelFiles {
+    Ncnn { param: PathBuf, bin: PathBuf },
+    Onnx { path: PathBuf },
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub name: String,
@@ -10,8 +31,36 @@ pub struct ModelInfo {
     pub license: String,
     pub source: String,
     pub notes: String,
-    pub param: PathBuf,
-    pub bin: PathBuf,
+    pub sha256: String,
+    pub denoise: bool,
+    pub files: ModelFiles,
+}
+
+impl ModelInfo {
+    pub fn kind(&self) -> BackendKind {
+        match self.files {
+            ModelFiles::Ncnn { .. } => BackendKind::Ncnn,
+            ModelFiles::Onnx { .. } => BackendKind::Onnx,
+        }
+    }
+
+    pub fn is_onnx(&self) -> bool {
+        matches!(self.files, ModelFiles::Onnx { .. })
+    }
+
+    pub fn files_present(&self) -> bool {
+        match &self.files {
+            ModelFiles::Ncnn { param, bin } => param.is_file() && bin.is_file(),
+            ModelFiles::Onnx { path } => path.is_file(),
+        }
+    }
+
+    pub fn location(&self) -> String {
+        match &self.files {
+            ModelFiles::Ncnn { param, bin } => format!("{} / {}", param.display(), bin.display()),
+            ModelFiles::Onnx { path } => path.display().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,11 +72,18 @@ struct ManifestEntry {
     source: String,
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    sha256: String,
+    #[serde(default)]
+    denoise: bool,
 }
 
 /// Scale encoded in names such as `ultrasharp-4x`, `4xNomos8kSC`, `model-x2`.
 pub fn infer_scale(name: &str) -> u32 {
     let n = name.to_ascii_lowercase();
+    if n.contains("scunet") {
+        return 1;
+    }
     // Longer tokens first so `x16` does not match as `x1`.
     const PATTERNS: &[(&str, u32)] = &[
         ("x16", 16),
@@ -40,6 +96,8 @@ pub fn infer_scale(name: &str) -> u32 {
         ("3x", 3),
         ("x2", 2),
         ("2x", 2),
+        ("x1", 1),
+        ("1x", 1),
     ];
     for (pat, scale) in PATTERNS {
         if n.contains(pat) {
@@ -60,55 +118,72 @@ pub fn cpu_backend_supports(name: &str) -> bool {
     KNOWN.iter().any(|k| name.contains(k))
 }
 
+pub fn denoise_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
+    models.iter().find(|m| m.denoise && m.files_present())
+}
+
 pub fn load_models(root: &Path) -> Vec<ModelInfo> {
     let dir = root.join("models");
     let manifest = read_manifest(&dir.join("manifest.json"));
-    let mut names = Vec::new();
+    let mut found: Vec<(String, ModelFiles)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("param") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
-        let bin = dir.join(format!("{stem}.bin"));
-        if bin.is_file() {
-            names.push(stem.to_string());
-        }
-    }
-    names.sort();
-    names
-        .into_iter()
-        .map(|name| {
-            let param = dir.join(format!("{name}.param"));
-            let bin = dir.join(format!("{name}.bin"));
-            if let Some(meta) = manifest.get(&name) {
-                ModelInfo {
-                    name,
-                    scale: meta.scale.max(1),
-                    license: fallback(&meta.license, "see models/MODELS.md"),
-                    source: meta.source.clone(),
-                    notes: meta.notes.clone(),
-                    param,
-                    bin,
-                }
-            } else {
-                ModelInfo {
-                    scale: infer_scale(&name),
-                    license: "see models/MODELS.md".into(),
-                    source: String::new(),
-                    notes: "Custom model (no manifest entry).".into(),
-                    name,
-                    param,
-                    bin,
+        let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("param") => {
+                let bin = dir.join(format!("{stem}.bin"));
+                if bin.is_file() {
+                    found.push((stem, ModelFiles::Ncnn { param: path, bin }));
                 }
             }
-        })
+            Some("onnx") => {
+                let ncnn = dir.join(format!("{stem}.param"));
+                // A same-named NCNN pair keeps the Vulkan path. The ONNX file is ignored.
+                if !ncnn.is_file() {
+                    found.push((stem, ModelFiles::Onnx { path }));
+                }
+            }
+            _ => {}
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+        .into_iter()
+        .map(|(name, files)| inflate(&name, files, manifest.get(&name)))
         .collect()
+}
+
+fn inflate(name: &str, files: ModelFiles, meta: Option<&ManifestEntry>) -> ModelInfo {
+    let denoise_name = name.to_ascii_lowercase().contains("scunet");
+    if let Some(meta) = meta {
+        ModelInfo {
+            scale: meta.scale.max(1),
+            license: fallback(&meta.license, "see models/MODELS.md"),
+            source: meta.source.clone(),
+            notes: meta.notes.clone(),
+            sha256: meta.sha256.clone(),
+            denoise: meta.denoise || denoise_name,
+            name: name.to_string(),
+            files,
+        }
+    } else {
+        ModelInfo {
+            scale: infer_scale(name),
+            license: "see models/MODELS.md".into(),
+            source: String::new(),
+            notes: "Custom model (no manifest entry).".into(),
+            sha256: String::new(),
+            denoise: denoise_name,
+            name: name.to_string(),
+            files,
+        }
+    }
 }
 
 fn fallback(value: &str, default: &str) -> String {
@@ -137,6 +212,8 @@ mod tests {
         assert_eq!(infer_scale("4xNomos8kSC"), 4);
         assert_eq!(infer_scale("realesr-animevideov3-x2"), 2);
         assert_eq!(infer_scale("realesr-animevideov3-x3"), 3);
+        assert_eq!(infer_scale("spanx4_ch48"), 4);
+        assert_eq!(infer_scale("scunet_color_real"), 1);
         assert_eq!(infer_scale("photo"), 4);
     }
 }
