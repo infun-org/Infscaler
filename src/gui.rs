@@ -48,6 +48,18 @@ fn prefer_x11_for_drag_and_drop() {
     }
 }
 
+fn window_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../assets/icon/infscaler-256.png"))
+        .expect("embedded window icon")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 fn run_inner(screenshot: Option<ScreenshotSpec>) -> eframe::Result {
     prefer_x11_for_drag_and_drop();
     let size = if screenshot.is_some() {
@@ -58,6 +70,8 @@ fn run_inner(screenshot: Option<ScreenshotSpec>) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("InfScaler")
+            .with_app_id("infscaler")
+            .with_icon(window_icon())
             .with_inner_size(size)
             .with_min_inner_size([880.0, 560.0])
             .with_drag_and_drop(true),
