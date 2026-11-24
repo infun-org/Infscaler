@@ -680,16 +680,10 @@ impl InfScalerApp {
         ui.label("Model");
         let onnx = self.selected().is_some_and(|m| m.is_onnx());
         let selected_name = if self.model_idx == self.models.len() {
-            "Auto · choose per image".to_string()
+            "Auto (choose per image)".to_string()
         } else {
             self.selected()
-                .map(|m| {
-                    if m.is_broken() {
-                        format!("{} · BROKEN · {}×", m.name, m.scale)
-                    } else {
-                        format!("{} · {} · {}×", m.name, m.kind().label(), m.scale)
-                    }
-                })
+                .map(|m| m.display_name())
                 .unwrap_or_else(|| "none".into())
         };
         egui::ComboBox::from_id_salt("model")
@@ -699,21 +693,20 @@ impl InfScalerApp {
                 ui.selectable_value(
                     &mut self.model_idx,
                     self.models.len(),
-                    "Auto · choose per image",
+                    "Auto (choose per image)",
                 );
                 for (idx, model) in self.models.iter().enumerate() {
-                    let label = if model.is_broken() {
-                        format!("{} · BROKEN · {}×", model.name, model.scale)
-                    } else {
-                        format!(
-                            "{} · {} · {}×",
-                            model.name,
-                            model.kind().label(),
-                            model.scale
-                        )
-                    };
+                    let label = model.display_name();
+                    let tip = format!(
+                        "{} · {} · {}×{}",
+                        model.name,
+                        model.kind().label(),
+                        model.scale,
+                        if model.is_broken() { " · BROKEN" } else { "" }
+                    );
                     ui.add_enabled_ui(!model.is_broken(), |ui| {
-                        ui.selectable_value(&mut self.model_idx, idx, label);
+                        ui.selectable_value(&mut self.model_idx, idx, label)
+                            .on_hover_text(tip);
                     });
                 }
                 if self.models.is_empty() {
