@@ -132,6 +132,11 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ),
     ("output_folder", "Output: {}", "Thư mục lưu: {}"),
     (
+        "output_folder_label",
+        "Output folder:",
+        "Thư mục lưu:",
+    ),
+    (
         "output_folder_auto",
         "Output folder: automatic",
         "Thư mục lưu: tự động",
@@ -1071,6 +1076,7 @@ mod tests {
             "tech_license",
             "tech_auto",
             "threads_hint",
+            "output_folder_label",
             "model",
             "gpu",
             "tile",

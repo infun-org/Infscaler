@@ -10,6 +10,7 @@ use eframe::egui;
 use crate::batch::BatchEvent;
 use crate::engine::{self, EngineEvent, GpuChoice, GpuDevice, JobOptions, RunOutcome};
 use crate::i18n::{self, Lang};
+use crate::icons::{self, Icon};
 use crate::models::{self, ModelInfo};
 use crate::paths;
 use crate::theme;
@@ -155,6 +156,7 @@ struct InfScalerApp {
     card_open: [bool; 4],
     #[allow(dead_code)]
     compare_on: bool,
+    show_result: bool,
     #[allow(dead_code)]
     pan_tool: bool,
     #[allow(dead_code)]
@@ -164,6 +166,7 @@ struct InfScalerApp {
     #[allow(dead_code)]
     more_open: bool,
     batch_jobs: usize,
+    batch_queue: bool,
     batch_threads: usize,
     batch_preset: String,
     batch_output_dir: Option<PathBuf>,
@@ -227,11 +230,13 @@ impl InfScalerApp {
             thumbs: ThumbCache::new(),
             card_open: [true; 4],
             compare_on: true,
+            show_result: false,
             pan_tool: false,
             about_open: false,
             show_log: false,
             more_open: false,
             batch_jobs: 1,
+            batch_queue: false,
             batch_threads: 4,
             batch_preset: "general".into(),
             batch_output_dir: None,
@@ -287,6 +292,11 @@ impl InfScalerApp {
         if let Some(dir) = &spec.queue {
             if let Ok(files) = crate::batch::scan_folder(dir) {
                 self.replace_queue(files);
+                if let Some(input) = spec.input.as_ref() {
+                    if let Some(index) = self.queue.iter().position(|item| &item.path == input) {
+                        self.queue_selected = index;
+                    }
+                }
                 if spec.fake_queue_states {
                     let after = spec.after.clone();
                     for (i, item) in self.queue.iter_mut().enumerate() {
@@ -338,7 +348,9 @@ impl InfScalerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if job.frames >= 10 && !job.requested {
+        let thumbs_ready =
+            self.queue.is_empty() || self.thumbs.ready_count() >= self.queue.len().min(8);
+        if (job.frames >= 28 || thumbs_ready && job.frames >= 10) && !job.requested {
             job.requested = true;
             let output = job.output.clone();
             let done = job.done.clone();
@@ -537,6 +549,8 @@ impl InfScalerApp {
             .add_filter(self.t("images_filter"), &["png", "jpg", "jpeg", "webp"])
             .pick_file();
         if let Some(path) = picked {
+            self.batch_queue = false;
+            self.push_queue_path(path.clone());
             self.load_input(ctx, path);
         }
     }
@@ -725,6 +739,7 @@ impl InfScalerApp {
     }
 
     fn replace_queue(&mut self, files: Vec<PathBuf>) {
+        self.batch_queue = true;
         self.queue = files
             .into_iter()
             .map(|path| QueueItem {
@@ -738,6 +753,7 @@ impl InfScalerApp {
     }
 
     fn extend_queue(&mut self, files: Vec<PathBuf>) {
+        self.batch_queue = true;
         for path in files {
             self.push_queue_path(path);
         }
@@ -800,6 +816,29 @@ impl InfScalerApp {
             };
         }
     }
+
+    fn select_queue_item(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(item) = self.queue.get(index) else {
+            return;
+        };
+        let path = item.path.clone();
+        let output = match &item.status {
+            QueueStatus::Done { output } => Some(output.clone()),
+            _ => None,
+        };
+        self.queue_selected = index;
+        self.load_input(ctx, path);
+        if let Some(output) = output {
+            if let Ok((rgba, w, h)) = engine::make_preview(&output, 1600) {
+                self.after = Some(load_texture(ctx, "after", &rgba, w, h));
+                if let Ok(size) = image::image_dimensions(&output) {
+                    self.output_size = Some(size);
+                }
+                self.output_path = output.display().to_string();
+                self.progress = 100.0;
+            }
+        }
+    }
 }
 
 impl eframe::App for InfScalerApp {
@@ -813,16 +852,13 @@ impl eframe::App for InfScalerApp {
             self.thumbs.request(path);
         }
         self.hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
-
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
                 .filter_map(|file| {
                     let path = file.path();
-                    if path.is_dir() {
-                        Some(path.to_path_buf())
-                    } else if engine::is_image_path(path) {
+                    if path.is_dir() || engine::is_image_path(path) {
                         Some(path.to_path_buf())
                     } else {
                         None
@@ -834,9 +870,14 @@ impl eframe::App for InfScalerApp {
             if !self.running {
                 if path.is_dir() {
                     if let Ok(files) = crate::batch::scan_folder(&path) {
+                        let was_empty = self.queue.is_empty();
                         self.extend_queue(files);
+                        if was_empty && !self.queue.is_empty() {
+                            self.select_queue_item(&ctx, 0);
+                        }
                     }
                 } else {
+                    self.batch_queue = false;
                     self.push_queue_path(path.clone());
                     self.load_input(&ctx, path);
                 }
@@ -846,520 +887,543 @@ impl eframe::App for InfScalerApp {
             self.pick_input(&ctx);
         }
 
-        egui::Panel::top("header")
-            .frame(theme::header_panel())
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(theme::title_text("InfScaler")));
-                    ui.add_space(12.0);
-                    ui.label(theme::caption_text(self.t("tagline")));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                !self.running,
-                                theme::standard_button(self.t("reload_models")),
-                            )
-                            .clicked()
-                        {
-                            self.reload_models();
-                            self.status = self.tr("model_count", &[&self.models.len().to_string()]);
+        if self.running || !self.error.is_empty() || self.show_log {
+            egui::Panel::bottom("status")
+                .frame(theme::slim_status_panel())
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if self.running {
+                            ui.add(
+                                egui::ProgressBar::new((self.progress / 100.0).clamp(0.0, 1.0))
+                                    .fill(theme::ACCENT)
+                                    .desired_width((ui.available_width() * 0.55).max(100.0)),
+                            );
                         }
-                        ui.add_space(8.0);
-                        theme::segmented_frame().show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.horizontal(|ui| {
-                                let current = self.lang;
-                                for lang in Lang::all() {
-                                    if ui
-                                        .add(theme::segmented_button(lang.label(), current == lang))
-                                        .clicked()
-                                        && current != lang
-                                    {
-                                        self.set_lang(lang);
-                                    }
-                                }
-                            });
-                        });
-                    });
-                });
-            });
-
-        egui::Panel::bottom("status")
-            .frame(theme::status_panel())
-            .show(ui, |ui| {
-                ui.scope(|ui| {
-                    ui.spacing_mut().interact_size.y = 4.0;
-                    ui.add(
-                        egui::ProgressBar::new((self.progress / 100.0).clamp(0.0, 1.0))
-                            .fill(theme::ACCENT)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&self.status)
-                            .color(theme::TEXT)
-                            .size(14.0),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(format_elapsed(self.current_elapsed()))
-                                .monospace()
-                                .color(theme::TEXT_SECONDARY)
-                                .size(12.0),
+                            egui::RichText::new(&self.status)
+                                .color(theme::TEXT)
+                                .size(13.0),
                         );
-                    });
-                });
-                if !self.error.is_empty() {
-                    ui.colored_label(theme::ERROR, egui::RichText::new(&self.error).size(13.0));
-                }
-                if !self.log.is_empty() {
-                    egui::ScrollArea::vertical()
-                        .max_height(72.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                egui::RichText::new(&self.log)
-                                    .size(11.0)
+                                egui::RichText::new(format_elapsed(self.current_elapsed()))
+                                    .monospace()
                                     .color(theme::TEXT_SECONDARY)
-                                    .monospace(),
+                                    .size(12.0),
                             );
                         });
-                }
-            });
+                    });
+                    if !self.error.is_empty() {
+                        ui.colored_label(theme::ERROR, egui::RichText::new(&self.error).size(12.0));
+                    }
+                    if self.show_log && !self.log.is_empty() {
+                        egui::ScrollArea::vertical()
+                            .max_height(72.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(&self.log)
+                                        .size(11.0)
+                                        .color(theme::TEXT_SECONDARY)
+                                        .monospace(),
+                                );
+                            });
+                    }
+                });
+        }
 
         egui::Panel::left("controls")
             .resizable(true)
             .default_size(400.0)
-            .min_size(320.0)
+            .min_size(360.0)
             .max_size(440.0)
             .show_separator_line(false)
             .frame(theme::mica_panel())
             .show(ui, |ui| {
                 let height = ui.available_height();
-                // Leave room for the card's inner margin, stroke and shadow so the
-                // last controls stay inside the rounded card and can scroll.
-                let scroll_h = (height - 48.0).max(64.0);
-                theme::card_frame().show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("controls-scroll")
-                        .auto_shrink([false, false])
-                        .max_height(scroll_h)
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            self.controls(ui, &ctx);
-                        });
-                });
+                let button_h = if self.running { 76.0 } else { 52.0 };
+                egui::ScrollArea::vertical()
+                    .id_salt("controls-scroll")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .auto_shrink([false, false])
+                    .max_height((height - button_h - 18.0).max(64.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.controls(ui, &ctx);
+                    });
+                ui.add_space(6.0);
+                if self.running {
+                    ui.horizontal(|ui| {
+                        if let Some(control) = &self.batch_control {
+                            let paused = control.paused.load(Ordering::SeqCst);
+                            if ui
+                                .add(theme::standard_button(if paused {
+                                    self.t("resume")
+                                } else {
+                                    self.t("pause")
+                                }))
+                                .clicked()
+                            {
+                                control.paused.store(!paused, Ordering::SeqCst);
+                            }
+                        }
+                        if ui.add(theme::danger_button(self.t("cancel"))).clicked() {
+                            self.cancel_job();
+                        }
+                    });
+                } else {
+                    let ready = !self.input_path.trim().is_empty()
+                        && (self.model_idx == self.models.len()
+                            || self.selected().is_some_and(|m| !m.is_broken()));
+                    let response = icons::labeled(
+                        ui,
+                        Icon::Play,
+                        self.t("enhance"),
+                        true,
+                        ready,
+                        ui.available_width(),
+                    );
+                    if response.clicked() {
+                        if self.batch_queue {
+                            self.start_batch();
+                        } else {
+                            self.start_job();
+                        }
+                    }
+                }
             });
 
         egui::CentralPanel::default()
             .frame(theme::mica_panel())
             .show(ui, |ui| {
                 let available = ui.available_size();
-                theme::card_frame().inner_margin(8.0).show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(
-                        (available.x - 24.0).max(64.0),
-                        (available.y - 24.0).max(64.0),
-                    ));
-                    self.preview(ui);
-                });
+                let preview_h = (available.y - 190.0).max(240.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(available.x, preview_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        theme::card_frame().show(ui, |ui| {
+                            self.preview(ui);
+                        });
+                        ui.add_space(10.0);
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(available.x, (available.y - preview_h - 10.0).max(150.0)),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.queue_strip(ui, &ctx);
+                    },
+                );
             });
-
         self.tick_screenshot(&ctx);
     }
 }
 
 impl InfScalerApp {
     fn controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.label(theme::subtitle_text(self.t("photo")));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.running, theme::standard_button(self.t("open")))
-                .clicked()
-            {
-                self.pick_input(ctx);
-            }
-            ui.label(theme::caption_text(self.t("or_drop_file")));
-        });
-        if ui
-            .add_enabled(
-                !self.running,
-                theme::standard_button(
-                    self.batch_output_dir
-                        .as_ref()
-                        .map(|p| self.tr("output_folder", &[&p.display().to_string()]))
-                        .unwrap_or_else(|| self.t("output_folder_auto").to_string()),
-                ),
-            )
-            .clicked()
-        {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title(self.t("choose_output_folder"))
-                .pick_folder()
-            {
-                self.batch_output_dir = Some(path);
-            }
-        }
-        ui.horizontal(|ui| {
-            ui.label(self.t("onnx_threads"))
-                .on_hover_text(self.t("threads_hint"));
-            ui.add(egui::DragValue::new(&mut self.batch_threads).range(1..=12));
-        });
-        if ui
-            .add_enabled(!self.running, theme::standard_button(self.t("open_folder")))
-            .clicked()
-        {
-            if let Some(folder) = rfd::FileDialog::new()
-                .set_title(self.t("open_image_folder"))
-                .pick_folder()
-            {
-                if let Ok(files) = crate::batch::scan_folder(&folder) {
-                    let n = files.len();
-                    self.replace_queue(files);
-                    self.status = self.tr("queued_top_level", &[&n.to_string()]);
-                }
-            }
-        }
-        ui.label(self.tr("queue_count", &[&self.queue.len().to_string()]));
-        egui::ComboBox::from_id_salt("batch-preset")
-            .selected_text(i18n::preset_label(self.lang, &self.batch_preset))
-            .width((ui.available_width() - 8.0).max(120.0))
-            .show_ui(ui, |ui| {
-                for p in ["general", "people", "fast"] {
-                    ui.selectable_value(
-                        &mut self.batch_preset,
-                        p.into(),
-                        i18n::preset_label(self.lang, p),
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(2.0);
+        let input_title = self.t("input_photo");
+        let mut input_open = self.card_open[0];
+        theme::collapsing_card(
+            ui,
+            "input-card",
+            Icon::Image,
+            input_title,
+            &mut input_open,
+            |ui| {
+                ui.horizontal(|ui| {
+                    let open = icons::labeled(
+                        ui,
+                        Icon::Open,
+                        self.t("open_photo_btn"),
+                        true,
+                        !self.running,
+                        116.0,
                     );
-                }
-            });
-        theme::segmented_frame().show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.horizontal(|ui| {
-                for n in 1..=3 {
-                    if ui
-                        .add(theme::segmented_button(
-                            i18n::jobs_label(self.lang, n),
-                            self.batch_jobs == n,
-                        ))
+                    if open.clicked() {
+                        self.pick_input(ctx);
+                    }
+                    let drop = icons::dashed_label_button(
+                        ui,
+                        Icon::Drop,
+                        self.t("drop_on_window"),
+                        self.hovering_file,
+                    );
+                    drop.on_hover_text(self.t("drop_here"));
+                });
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.label(self.t("output_folder_label"));
+                    let label = self
+                        .batch_output_dir
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| self.t("auto").to_string());
+                    egui::ComboBox::from_id_salt("output-folder")
+                        .selected_text(label)
+                        .width((ui.available_width() - 38.0).max(90.0))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(self.batch_output_dir.is_none(), self.t("auto"))
+                                .clicked()
+                            {
+                                self.batch_output_dir = None;
+                            }
+                            if let Some(path) = &self.batch_output_dir {
+                                let path = path.clone();
+                                if ui
+                                    .selectable_label(true, path.display().to_string())
+                                    .clicked()
+                                {
+                                    self.batch_output_dir = Some(path);
+                                }
+                            }
+                        });
+                    if icons::icon_button(ui, Icon::Folder, false, self.t("choose_output_folder"))
                         .clicked()
                         && !self.running
                     {
-                        self.batch_jobs = n;
-                    }
-                }
-            });
-        });
-        if !self.queue.is_empty() {
-            egui::ScrollArea::vertical()
-                .max_height(110.0)
-                .show(ui, |ui| {
-                    for item in self.queue.iter().take(80) {
-                        ui.label(item.path.file_name().unwrap_or_default().to_string_lossy());
-                    }
-                    if self.queue.len() > 80 {
-                        ui.label(self.tr("and_more", &[&(self.queue.len() - 80).to_string()]));
-                    }
-                });
-            if ui
-                .add_enabled(
-                    !self.running,
-                    theme::accent_button(self.t("process_queued")),
-                )
-                .clicked()
-            {
-                self.start_batch();
-            }
-        }
-        ui.add_enabled_ui(!self.running, |ui| {
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.input_path)
-                    .hint_text("input.jpg")
-                    .desired_width(f32::INFINITY),
-            );
-            theme::underline_focus(ui, &response);
-        });
-        if let Some((w, h)) = self.input_size {
-            ui.label(theme::caption_text(format!("{w} × {h} px")));
-        }
-
-        ui.add_space(16.0);
-        ui.label(theme::subtitle_text(self.t("model")));
-        ui.add_space(8.0);
-        let onnx = self.selected().is_some_and(|m| m.is_onnx());
-        let selected_name = if self.model_idx == self.models.len() {
-            self.t("auto_choose").to_string()
-        } else {
-            self.selected()
-                .map(|m| m.display_name(self.lang))
-                .unwrap_or_else(|| self.t("none").to_string())
-        };
-        egui::ComboBox::from_id_salt("model")
-            .selected_text(selected_name)
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                let auto_choose = self.t("auto_choose");
-                ui.selectable_value(&mut self.model_idx, self.models.len(), auto_choose);
-                for (idx, model) in self.models.iter().enumerate() {
-                    let label = model.display_name(self.lang);
-                    let tip = format!(
-                        "{} · {} · {}×{}",
-                        model.name,
-                        model.kind().label(),
-                        model.scale,
-                        if model.is_broken() {
-                            self.t("broken_suffix")
-                        } else {
-                            ""
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title(self.t("choose_output_folder"))
+                            .pick_folder()
+                        {
+                            self.batch_output_dir = Some(path);
                         }
-                    );
-                    ui.add_enabled_ui(!model.is_broken(), |ui| {
-                        ui.selectable_value(&mut self.model_idx, idx, label)
-                            .on_hover_text(tip);
-                    });
-                }
-                if self.models.is_empty() {
-                    ui.label(self.t("no_models_in_folder"));
-                }
-            });
-        let lang = self.lang;
-        if self.model_idx == self.models.len() {
-            ui.label(egui::RichText::new(self.t("desc_auto")).size(12.5));
-            egui::CollapsingHeader::new(self.t("technical_details"))
-                .id_salt("tech-auto")
-                .default_open(false)
-                .open(if self.expand_tech { Some(true) } else { None })
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "tech_auto"))
-                            .weak()
-                            .size(11.5),
-                    );
-                });
-        } else if let Some(model) = self.selected() {
-            let desc = i18n::model_description(lang, &model.name)
-                .unwrap_or_else(|| i18n::t(lang, "desc_custom"));
-            let color = if model.is_broken() {
-                theme::ERROR
-            } else {
-                theme::TEXT_SECONDARY
-            };
-            ui.label(egui::RichText::new(desc).size(12.0).color(color));
-            egui::CollapsingHeader::new(i18n::t(lang, "technical_details"))
-                .id_salt("tech-model")
-                .default_open(false)
-                .open(if self.expand_tech { Some(true) } else { None })
-                .show(ui, |ui| {
-                    let small = |ui: &mut egui::Ui, text: String| {
-                        ui.label(egui::RichText::new(text).weak().size(11.5));
-                    };
-                    small(ui, i18n::tr(lang, "tech_model", &[&model.name]));
-                    small(ui, i18n::tr(lang, "tech_backend", &[model.kind().label()]));
-                    small(
-                        ui,
-                        i18n::tr(lang, "tech_scale", &[&model.scale.to_string()]),
-                    );
-                    small(ui, i18n::tr(lang, "tech_license", &[&model.license]));
-                    if let Some(reason) = &model.broken_reason {
-                        small(ui, i18n::tr(lang, "broken_reason", &[reason]));
-                    }
-                    if !model.notes.is_empty() {
-                        small(ui, model.notes.clone());
-                    }
-                    if !model.source.is_empty() {
-                        small(ui, model.source.clone());
                     }
                 });
-        }
-
-        ui.add_space(16.0);
-        ui.label(theme::subtitle_text(self.t("output_size")));
-        ui.add_space(8.0);
-        ui.add_enabled_ui(!self.running, |ui| {
-            theme::segmented_frame().show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(theme::segmented_button(
-                            self.t("original_sharpen"),
-                            self.keep_size,
-                        ))
-                        .on_hover_text(self.t("original_sharpen_tip"))
-                        .clicked()
-                    {
-                        self.keep_size = true;
-                    }
-                    for value in [2, 3, 4] {
+                    ui.label(self.t("onnx_threads"))
+                        .on_hover_text(self.t("threads_hint"));
+                    ui.add_enabled(
+                        !self.running,
+                        egui::DragValue::new(&mut self.batch_threads).range(1..=12),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(theme::segmented_button(
-                                format!("{value}×"),
-                                !self.keep_size && self.scale == value,
-                            ))
+                            .add_enabled(
+                                !self.running,
+                                theme::standard_button(self.t("open_folder")),
+                            )
                             .clicked()
                         {
-                            self.keep_size = false;
-                            self.scale = value;
+                            if let Some(folder) = rfd::FileDialog::new()
+                                .set_title(self.t("open_image_folder"))
+                                .pick_folder()
+                            {
+                                if let Ok(files) = crate::batch::scan_folder(&folder) {
+                                    let n = files.len();
+                                    self.replace_queue(files);
+                                    if !self.queue.is_empty() {
+                                        self.select_queue_item(&ctx, 0);
+                                    }
+                                    self.status = self.tr("queued_top_level", &[&n.to_string()]);
+                                }
+                            }
                         }
+                    });
+                });
+                ui.label(theme::caption_text(
+                    self.tr("queue_count", &[&self.queue.len().to_string()]),
+                ));
+                egui::ComboBox::from_id_salt("batch-preset")
+                    .selected_text(i18n::preset_label(self.lang, &self.batch_preset))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for p in ["general", "people", "fast"] {
+                            ui.selectable_value(
+                                &mut self.batch_preset,
+                                p.into(),
+                                i18n::preset_label(self.lang, p),
+                            );
+                        }
+                    });
+                ui.add_enabled_ui(!self.running, |ui| {
+                    theme::segmented_frame().show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.horizontal(|ui| {
+                            let w = ui.available_width() / 3.0;
+                            for n in 1..=3 {
+                                if ui
+                                    .add_sized(
+                                        [w, 28.0],
+                                        theme::segmented_button(
+                                            i18n::jobs_label(self.lang, n),
+                                            self.batch_jobs == n,
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.batch_jobs = n;
+                                }
+                            }
+                        });
+                    });
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.input_path)
+                            .hint_text("input.jpg")
+                            .desired_width(f32::INFINITY),
+                    );
+                    theme::underline_focus(ui, &response);
+                });
+            },
+        );
+        self.card_open[0] = input_open;
+        ui.add_space(3.0);
+
+        let style_title = self.t("model");
+        let mut style_open = self.card_open[1];
+        theme::collapsing_card(
+            ui,
+            "style-card",
+            Icon::Sparkle,
+            style_title,
+            &mut style_open,
+            |ui| {
+                let selected = if self.model_idx == self.models.len() {
+                    self.t("auto_choose").to_string()
+                } else {
+                    self.selected()
+                        .map(|m| m.display_name(self.lang))
+                        .unwrap_or_else(|| self.t("none").to_string())
+                };
+                let auto_choose = self.t("auto_choose");
+                egui::ComboBox::from_id_salt("model")
+                    .selected_text(selected)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.model_idx, self.models.len(), auto_choose);
+                        for (idx, model) in self.models.iter().enumerate() {
+                            let label = model.display_name(self.lang);
+                            let tip = format!(
+                                "{} · {} · {}×{}",
+                                model.name,
+                                model.kind().label(),
+                                model.scale,
+                                if model.is_broken() {
+                                    self.t("broken_suffix")
+                                } else {
+                                    ""
+                                }
+                            );
+                            ui.add_enabled_ui(!model.is_broken(), |ui| {
+                                ui.selectable_value(&mut self.model_idx, idx, label)
+                                    .on_hover_text(tip);
+                            });
+                        }
+                        if self.models.is_empty() {
+                            ui.label(self.t("no_models_in_folder"));
+                        }
+                    });
+                let lang = self.lang;
+                if self.model_idx == self.models.len() {
+                    ui.label(egui::RichText::new(self.t("desc_auto")).size(12.0));
+                    egui::CollapsingHeader::new(self.t("technical_details"))
+                        .id_salt("tech-auto")
+                        .default_open(false)
+                        .open(if self.expand_tech { Some(true) } else { None })
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(i18n::t(lang, "tech_auto"))
+                                    .weak()
+                                    .size(11.0),
+                            );
+                        });
+                } else if let Some(model) = self.selected() {
+                    let desc = i18n::model_description(lang, &model.name)
+                        .unwrap_or_else(|| i18n::t(lang, "desc_custom"));
+                    ui.label(
+                        egui::RichText::new(desc)
+                            .size(12.0)
+                            .color(if model.is_broken() {
+                                theme::ERROR
+                            } else {
+                                theme::TEXT_SECONDARY
+                            }),
+                    );
+                    egui::CollapsingHeader::new(i18n::t(lang, "technical_details"))
+                        .id_salt("tech-model")
+                        .default_open(false)
+                        .open(if self.expand_tech { Some(true) } else { None })
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(i18n::tr(lang, "tech_model", &[&model.name]))
+                                    .weak()
+                                    .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(i18n::tr(
+                                    lang,
+                                    "tech_backend",
+                                    &[model.kind().label()],
+                                ))
+                                .weak()
+                                .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(i18n::tr(
+                                    lang,
+                                    "tech_scale",
+                                    &[&model.scale.to_string()],
+                                ))
+                                .weak()
+                                .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(i18n::tr(
+                                    lang,
+                                    "tech_license",
+                                    &[&model.license],
+                                ))
+                                .weak()
+                                .size(11.0),
+                            );
+                            if let Some(reason) = &model.broken_reason {
+                                ui.label(
+                                    egui::RichText::new(i18n::tr(lang, "broken_reason", &[reason]))
+                                        .weak()
+                                        .size(11.0),
+                                );
+                            }
+                            if !model.notes.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(model.notes.clone()).weak().size(11.0),
+                                );
+                            }
+                            if !model.source.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(model.source.clone()).weak().size(11.0),
+                                );
+                            }
+                        });
+                }
+            },
+        );
+        self.card_open[1] = style_open;
+        ui.add_space(3.0);
+
+        let size_title = self.t("output_size");
+        let mut size_open = self.card_open[2];
+        theme::collapsing_card(
+            ui,
+            "size-card",
+            Icon::Resize,
+            size_title,
+            &mut size_open,
+            |ui| {
+                ui.add_enabled_ui(!self.running, |ui| {
+                    theme::segmented_frame().show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.horizontal(|ui| {
+                            let w = ui.available_width() / 4.0;
+                            let options = [
+                                (self.t("original_short").to_string(), 1),
+                                ("2×".into(), 2),
+                                ("3×".into(), 3),
+                                ("4×".into(), 4),
+                            ];
+                            for (label, value) in options {
+                                if ui
+                                    .add_sized(
+                                        [w, 28.0],
+                                        theme::segmented_button(
+                                            label,
+                                            if value == 1 {
+                                                self.keep_size
+                                            } else {
+                                                !self.keep_size && self.scale == value
+                                            },
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.keep_size = value == 1;
+                                    if value > 1 {
+                                        self.scale = value;
+                                    }
+                                }
+                            }
+                        });
+                    });
+                });
+                let model_scale = self.selected().map(|m| m.scale).unwrap_or(4);
+                let hint = if self.keep_size {
+                    self.t("hint_keep_size").to_string()
+                } else if self.scale == model_scale {
+                    self.tr("hint_native", &[&self.scale.to_string()])
+                } else {
+                    self.tr("hint_rescale", &[&self.scale.to_string()])
+                };
+                ui.label(theme::caption_text(hint));
+                ui.horizontal(|ui| {
+                    ui.label(self.t("tile"));
+                    theme::stepper(ui, &mut self.tile, 0..=1024);
+                    ui.label(theme::caption_text(self.t("tile_auto")));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(self.t("overlap"));
+                    theme::stepper(ui, &mut self.overlap, 0..=256);
+                    ui.label(theme::caption_text(self.t("onnx_seams")));
+                });
+                ui.label(theme::caption_text(self.t("tile_hint")));
+            },
+        );
+        self.card_open[2] = size_open;
+        ui.add_space(3.0);
+
+        let gpu_title = self.t("gpu");
+        let mut gpu_open = self.card_open[3];
+        theme::collapsing_card(ui, "gpu-card", Icon::Gpu, gpu_title, &mut gpu_open, |ui| {
+            ui.spacing_mut().interact_size.y = 22.0;
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let auto_label = self.t("auto");
+            let tta_label = self.t("tta");
+            let denoise_label = self.t("denoise_first");
+            let face_label = self.t("face_restore");
+            let fast_label = self.t("fast_auto");
+            egui::ComboBox::from_id_salt("gpu")
+                .selected_text(self.gpu_label())
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.gpu, "auto".into(), auto_label);
+                    for device in &self.gpus {
+                        ui.selectable_value(&mut self.gpu, device.id.clone(), &device.label);
                     }
+                    ui.label(self.t("cpu_hint"));
+                });
+            let onnx = self.selected().is_some_and(|m| m.is_onnx());
+            ui.add_enabled(
+                !self.running && !onnx && (self.model_idx != self.models.len() || self.fast),
+                egui::Checkbox::new(&mut self.tta, tta_label),
+            );
+            if onnx {
+                ui.label(theme::caption_text(self.t("tta_onnx_hint")));
+            }
+            let has_denoise = self.models.iter().any(|m| m.denoise);
+            ui.add_enabled(
+                !self.running && has_denoise,
+                egui::Checkbox::new(&mut self.denoise, denoise_label),
+            );
+            ui.add_enabled(
+                !self.running,
+                egui::Checkbox::new(&mut self.face_restore, face_label),
+            );
+            ui.add_enabled_ui(!self.running && self.face_restore, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(self.t("face_strength"));
+                    ui.add(egui::Slider::new(&mut self.face_strength, 0.0..=1.0));
                 });
             });
-        });
-        let model_scale = self.selected().map(|m| m.scale).unwrap_or(4);
-        let hint = if self.keep_size {
-            self.t("hint_keep_size").to_string()
-        } else if self.scale == model_scale {
-            self.tr("hint_native", &[&self.scale.to_string()])
-        } else {
-            self.tr("hint_rescale", &[&self.scale.to_string()])
-        };
-        ui.label(theme::caption_text(hint));
-
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            ui.label(self.t("tile"));
-            ui.add_enabled(
-                !self.running,
-                egui::DragValue::new(&mut self.tile)
-                    .range(0..=1024)
-                    .speed(16),
-            );
-            ui.label(theme::caption_text(self.t("tile_auto")));
-        });
-        ui.horizontal(|ui| {
-            ui.label(self.t("overlap"));
-            ui.add_enabled(
-                !self.running,
-                egui::DragValue::new(&mut self.overlap)
-                    .range(0..=256)
-                    .speed(4),
-            );
-            ui.label(theme::caption_text(self.t("onnx_seams")));
-        });
-        ui.label(theme::caption_text(self.t("tile_hint")));
-
-        ui.add_space(16.0);
-        ui.label(theme::subtitle_text(self.t("gpu")));
-        ui.add_space(8.0);
-        let gpu_label = self.gpu_label();
-        egui::ComboBox::from_id_salt("gpu")
-            .selected_text(gpu_label)
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                let auto_gpu = self.t("auto");
-                ui.selectable_value(&mut self.gpu, "auto".into(), auto_gpu);
-                for device in &self.gpus {
-                    ui.selectable_value(&mut self.gpu, device.id.clone(), &device.label);
-                }
-                ui.label(self.t("cpu_hint"));
-            });
-
-        ui.add_space(6.0);
-        let tta_label = self.t("tta");
-        let denoise_label = self.t("denoise_first");
-        let face_restore_label = self.t("face_restore");
-        let fast_auto_label = self.t("fast_auto");
-        ui.add_enabled(
-            !self.running && !onnx && (self.model_idx != self.models.len() || self.fast),
-            egui::Checkbox::new(&mut self.tta, tta_label),
-        );
-        if onnx {
-            ui.label(theme::caption_text(self.t("tta_onnx_hint")));
-        }
-        let has_denoise = self.models.iter().any(|m| m.denoise);
-        ui.add_enabled(
-            !self.running && has_denoise,
-            egui::Checkbox::new(&mut self.denoise, denoise_label),
-        );
-        ui.add_enabled(
-            !self.running,
-            egui::Checkbox::new(&mut self.face_restore, face_restore_label),
-        );
-        ui.add_enabled_ui(!self.running && self.face_restore, |ui| {
-            let face_strength_label = self.t("face_strength");
-            ui.horizontal(|ui| {
-                ui.label(face_strength_label);
-                ui.add(egui::Slider::new(&mut self.face_strength, 0.0..=1.0));
-            });
-        });
-        if self.model_idx == self.models.len() {
-            ui.add_enabled(
-                !self.running,
-                egui::Checkbox::new(&mut self.fast, fast_auto_label),
-            );
-        }
-
-        ui.add_space(16.0);
-        ui.label(theme::subtitle_text(self.t("save_as")));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(!self.running, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.output_path)
-                        .hint_text("enhanced.png")
-                        .desired_width((ui.available_width() - 90.0).max(80.0)),
+            if self.model_idx == self.models.len() {
+                ui.add_enabled(
+                    !self.running,
+                    egui::Checkbox::new(&mut self.fast, fast_label),
                 );
-                theme::underline_focus(ui, &response);
-            });
-            if ui
-                .add_enabled(!self.running, theme::standard_button(self.t("browse")))
-                .clicked()
-            {
-                self.pick_output();
             }
         });
-        if let Some((w, h)) = self.output_size {
-            ui.label(theme::caption_text(
-                self.tr("last_result", &[&w.to_string(), &h.to_string()]),
-            ));
-        }
-
-        ui.add_space(12.0);
-        if self.running {
-            if let Some(control) = &self.batch_control {
-                let paused = control.paused.load(Ordering::SeqCst);
-                if ui
-                    .add(theme::standard_button(if paused {
-                        self.t("resume")
-                    } else {
-                        self.t("pause")
-                    }))
-                    .clicked()
-                {
-                    control.paused.store(!paused, Ordering::SeqCst);
-                }
-            }
-            if ui
-                .add_sized(
-                    [ui.available_width(), 32.0],
-                    theme::danger_button(self.t("cancel")),
-                )
-                .clicked()
-            {
-                self.cancel_job();
-            }
-        } else {
-            let ready = !self.input_path.trim().is_empty()
-                && (self.model_idx == self.models.len()
-                    || self.selected().is_some_and(|model| !model.is_broken()));
-            let mut enhance = false;
-            ui.add_enabled_ui(ready, |ui| {
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 32.0],
-                        theme::accent_button(self.t("enhance")),
-                    )
-                    .clicked()
-                {
-                    enhance = true;
-                }
-            });
-            if enhance {
-                self.start_job();
-            }
-        }
-        ui.add_space(8.0);
+        self.card_open[3] = gpu_open;
+        ui.add_space(4.0);
         if self.scroll_controls {
             ui.scroll_to_cursor_animation(
                 Some(egui::Align::BOTTOM),
@@ -1369,17 +1433,140 @@ impl InfScalerApp {
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
-        let available = ui.available_size();
-        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-        let before_size = self.before.as_ref().map(|tex| tex.size_vec2());
-        let before_id = self.before.as_ref().map(|tex| tex.id());
-        let after_id = self.after.as_ref().map(|tex| tex.id());
-
+        ui.horizontal(|ui| {
+            icons::paint(
+                ui,
+                Icon::Image,
+                ui.next_widget_position() + egui::vec2(9.0, 10.0),
+                18.0,
+                theme::TEXT,
+            );
+            ui.add_space(24.0);
+            ui.label(theme::section_text(self.t("preview")));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let more = icons::icon_button(ui, Icon::More, false, self.t("more_menu"));
+                more.context_menu(|ui| {
+                    if ui.button(self.t("open_output_folder")).clicked() {
+                        let target = self
+                            .batch_output_dir
+                            .clone()
+                            .or_else(|| {
+                                Path::new(&self.output_path).parent().map(Path::to_path_buf)
+                            })
+                            .or_else(|| std::env::current_dir().ok());
+                        if let Some(path) = target {
+                            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+                        }
+                        ui.close();
+                    }
+                    if ui.button(self.t("save_as")).clicked() {
+                        self.pick_output();
+                        ui.close();
+                    }
+                    if ui.button(self.t("about")).clicked() {
+                        self.about_open = true;
+                        ui.close();
+                    }
+                    if ui
+                        .button(if self.show_log {
+                            self.t("hide_log")
+                        } else {
+                            self.t("show_log")
+                        })
+                        .clicked()
+                    {
+                        self.show_log = !self.show_log;
+                        ui.close();
+                    }
+                });
+                if icons::labeled(
+                    ui,
+                    Icon::Refresh,
+                    self.t("reload_models"),
+                    false,
+                    !self.running,
+                    0.0,
+                )
+                .clicked()
+                    && !self.running
+                {
+                    self.reload_models();
+                    self.status = self.tr("model_count", &[&self.models.len().to_string()]);
+                }
+                ui.allocate_ui_with_layout(
+                    egui::vec2(210.0, 32.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            let (globe_rect, _) = ui
+                                .allocate_exact_size(egui::vec2(20.0, 28.0), egui::Sense::hover());
+                            icons::paint(
+                                ui,
+                                Icon::Globe,
+                                globe_rect.center(),
+                                16.0,
+                                theme::TEXT_SECONDARY,
+                            );
+                            let current = self.lang;
+                            for lang in Lang::all().into_iter().rev() {
+                                if ui
+                                    .add(theme::segmented_button(lang.label(), current == lang))
+                                    .clicked()
+                                    && current != lang
+                                {
+                                    self.set_lang(lang);
+                                }
+                            }
+                        });
+                    },
+                );
+            });
+        });
+        ui.add_space(8.0);
+        if self.about_open {
+            let about_blurb = self.t("about_blurb");
+            egui::Window::new(self.t("about"))
+                .open(&mut self.about_open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label("InfScaler");
+                    ui.label(about_blurb);
+                });
+        }
+        let has_after = self.after.is_some();
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            if ui
+                .add(theme::segmented_button(
+                    self.t("original_short"),
+                    !self.show_result,
+                ))
+                .clicked()
+            {
+                self.show_result = false;
+                self.compare_on = false;
+            }
+            if ui
+                .add_enabled(
+                    has_after,
+                    theme::segmented_button(self.t("result"), self.show_result),
+                )
+                .clicked()
+            {
+                self.show_result = true;
+                self.compare_on = false;
+            }
+        });
+        let image_h = (ui.available_height() - 44.0).max(80.0);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), image_h),
+            egui::Sense::click_and_drag(),
+        );
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 8.0, theme::WHITE);
-
-        let Some(before_size) = before_size else {
-            let dash = rect.shrink(20.0);
+        painter.rect_filled(rect, 6.0, theme::WHITE);
+        let Some(before) = self.before.as_ref() else {
+            let dash = rect.shrink(18.0);
             theme::dashed_rounded_rect(
                 &painter,
                 dash,
@@ -1393,18 +1580,15 @@ impl InfScalerApp {
                     },
                 ),
             );
-            theme::paint_image_glyph(
-                &painter,
-                dash.center() - egui::vec2(0.0, 28.0),
+            icons::paint(
+                ui,
+                Icon::Image,
+                dash.center() - egui::vec2(0.0, 20.0),
                 48.0,
-                if self.hovering_file {
-                    theme::ACCENT
-                } else {
-                    theme::TEXT_SECONDARY
-                },
+                theme::TEXT_SECONDARY,
             );
             painter.text(
-                dash.center() + egui::vec2(0.0, 28.0),
+                dash.center() + egui::vec2(0.0, 26.0),
                 egui::Align2::CENTER_CENTER,
                 self.t("drop_here"),
                 egui::FontId::proportional(14.0),
@@ -1412,15 +1596,15 @@ impl InfScalerApp {
             );
             return;
         };
-        let Some(before_id) = before_id else { return };
-
+        let before_size = before.size_vec2();
+        let before_id = before.id();
+        let after_id = self.after.as_ref().map(|t| t.id());
         let aspect = if before_size.y <= 0.0 {
             1.0
         } else {
             before_size.x / before_size.y
         };
-        let fitted = fit_rect(rect.shrink(16.0), aspect);
-
+        let base = fit_rect(rect.shrink(14.0), aspect);
         if response.double_clicked() {
             self.zoom = 1.0;
             self.pan = egui::Vec2::ZERO;
@@ -1431,39 +1615,37 @@ impl InfScalerApp {
                 let old = self.zoom;
                 self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.25, 8.0);
                 if let Some(pos) = pointer {
-                    self.pan += (pos - fitted.center()) * (1.0 - self.zoom / old);
+                    self.pan += (pos - base.center()) * (1.0 - self.zoom / old);
                 }
             }
         }
-        // At fit size or smaller the image stays pinned to the center. When
-        // zoomed in, keep the pan inside the image so it never drifts away.
         if self.zoom <= 1.0 {
             self.pan = egui::Vec2::ZERO;
         } else {
-            let max = (fitted.size() * self.zoom - fitted.size()) * 0.5;
+            let max = (base.size() * self.zoom - base.size()) * 0.5;
             self.pan = egui::vec2(
                 self.pan.x.clamp(-max.x, max.x),
                 self.pan.y.clamp(-max.y, max.y),
             );
         }
         let fitted =
-            egui::Rect::from_center_size(fitted.center() + self.pan, fitted.size() * self.zoom);
-
-        // The split line lives in the visible part of the image, so it stays on
-        // screen and draggable at any zoom level.
+            egui::Rect::from_center_size(base.center() + self.pan, base.size() * self.zoom);
         let visible = fitted.intersect(rect);
         let split_x = |split: f32| visible.left() + visible.width() * split;
         if response.drag_started_by(egui::PointerButton::Primary) {
-            let near_line = response
-                .interact_pointer_pos()
-                .is_some_and(|pos| (pos.x - split_x(self.split)).abs() <= 14.0);
-            self.dragging_split = near_line || self.zoom <= 1.01;
+            self.dragging_split = self.compare_on
+                && after_id.is_some()
+                && response
+                    .interact_pointer_pos()
+                    .is_some_and(|p| (p.x - split_x(self.split)).abs() <= 14.0);
         }
         if response.drag_stopped() {
             self.dragging_split = false;
         }
         if response.dragged_by(egui::PointerButton::Middle)
-            || (response.dragged_by(egui::PointerButton::Primary) && !self.dragging_split)
+            || (response.dragged_by(egui::PointerButton::Primary)
+                && !self.dragging_split
+                && self.pan_tool)
         {
             if self.zoom > 1.0 {
                 self.pan += response.drag_delta();
@@ -1475,17 +1657,9 @@ impl InfScalerApp {
                 }
             }
         }
-        if let Some(pos) = response.hover_pos() {
-            if self.dragging_split || (pos.x - split_x(self.split)).abs() <= 14.0 {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            } else if self.zoom > 1.01 {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-            }
-        }
-
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        if let Some(after_id) = after_id {
-            painter.image(after_id, fitted, uv, egui::Color32::WHITE);
+        if self.compare_on && after_id.is_some() {
+            painter.image(after_id.unwrap(), fitted, uv, egui::Color32::WHITE);
             let clip = egui::Rect::from_min_max(
                 fitted.min,
                 egui::pos2(split_x(self.split), fitted.bottom()),
@@ -1502,28 +1676,15 @@ impl InfScalerApp {
                 egui::Stroke::new(2.0, egui::Color32::WHITE),
             );
             painter.circle_filled(egui::pos2(x, visible.center().y), 7.0, egui::Color32::WHITE);
-            theme::pill(
-                &painter,
-                egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
-                self.t("before"),
-                false,
-            );
-            theme::pill(
-                &painter,
-                egui::pos2(fitted.right() - 8.0, fitted.top() + 8.0),
-                self.t("after"),
-                true,
-            );
+        } else if self.show_result {
+            if let Some(id) = after_id {
+                painter.image(id, fitted, uv, egui::Color32::WHITE);
+            } else {
+                painter.image(before_id, fitted, uv, egui::Color32::WHITE);
+            }
         } else {
             painter.image(before_id, fitted, uv, egui::Color32::WHITE);
-            theme::pill(
-                &painter,
-                egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
-                self.t("original"),
-                false,
-            );
         }
-
         if self.hovering_file {
             theme::dashed_rounded_rect(
                 &painter,
@@ -1532,6 +1693,199 @@ impl InfScalerApp {
                 egui::Stroke::new(2.0, theme::ACCENT),
             );
         }
+
+        ui.horizontal(|ui| {
+            ui.add_space((ui.available_width() * 0.28).max(0.0));
+            if icons::icon_button(ui, Icon::Fit, false, self.t("fit_to_window")).clicked() {
+                self.zoom = 1.0;
+                self.pan = egui::Vec2::ZERO;
+            }
+            let native = self
+                .input_size
+                .unwrap_or((before_size.x as u32, before_size.y as u32));
+            let fit_scale = if native.0 > 0 {
+                base.width() / native.0 as f32
+            } else {
+                1.0
+            };
+            let pct = (self.zoom * fit_scale * 100.0).round() as i32;
+            egui::ComboBox::from_id_salt("zoom-pct")
+                .selected_text(format!("{pct}%"))
+                .width(74.0)
+                .show_ui(ui, |ui| {
+                    for value in [25, 50, 100, 200, 400] {
+                        if ui
+                            .selectable_label(pct == value, format!("{value}%"))
+                            .clicked()
+                        {
+                            self.zoom =
+                                ((value as f32 / 100.0) / fit_scale.max(0.001)).clamp(0.25, 8.0);
+                            self.pan = egui::Vec2::ZERO;
+                        }
+                    }
+                    if ui
+                        .selectable_label((self.zoom - 1.0).abs() < 0.01, self.t("zoom_fit"))
+                        .clicked()
+                    {
+                        self.zoom = 1.0;
+                        self.pan = egui::Vec2::ZERO;
+                    }
+                });
+            if icons::icon_button(ui, Icon::Minus, false, self.t("zoom")).clicked() {
+                self.zoom = (self.zoom / 1.25).clamp(0.25, 8.0);
+            }
+            if icons::icon_button(ui, Icon::Plus, false, self.t("zoom")).clicked() {
+                self.zoom = (self.zoom * 1.25).clamp(0.25, 8.0);
+            }
+            ui.separator();
+            if icons::icon_button(ui, Icon::Hand, self.pan_tool, self.t("pan_tool")).clicked() {
+                self.pan_tool = !self.pan_tool;
+            }
+            if icons::icon_button(ui, Icon::Compare, self.compare_on, self.t("compare_tool"))
+                .clicked()
+            {
+                self.compare_on = !self.compare_on;
+            }
+        });
+    }
+
+    fn queue_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        theme::card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                icons::paint(
+                    ui,
+                    Icon::Queue,
+                    ui.next_widget_position() + egui::vec2(8.0, 10.0),
+                    18.0,
+                    theme::TEXT,
+                );
+                ui.add_space(24.0);
+                ui.label(theme::section_text(self.t("image_queue")));
+                ui.label(theme::caption_text(
+                    self.tr("queue_count_short", &[&self.queue.len().to_string()]),
+                ));
+            });
+            if self.queue.is_empty() {
+                ui.label(theme::caption_text(self.t("queue_empty")));
+            } else {
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut select = None;
+                            for (index, item) in self.queue.iter().enumerate() {
+                                let selected = index == self.queue_selected;
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(108.0, 104.0),
+                                    egui::Sense::click(),
+                                );
+                                let painter = ui.painter_at(rect);
+                                let border_color =
+                                    if selected || matches!(item.status, QueueStatus::Processing) {
+                                        theme::ACCENT
+                                    } else {
+                                        theme::BORDER
+                                    };
+                                painter.rect(
+                                    rect,
+                                    8.0,
+                                    theme::CARD,
+                                    egui::Stroke::new(
+                                        if selected
+                                            || matches!(item.status, QueueStatus::Processing)
+                                        {
+                                            2.0
+                                        } else {
+                                            1.0
+                                        },
+                                        border_color,
+                                    ),
+                                    egui::StrokeKind::Inside,
+                                );
+                                if let Some(thumb) = self.thumbs.get(&item.path) {
+                                    let id = match item.status {
+                                        QueueStatus::Pending => thumb.gray.id(),
+                                        _ => thumb.color.id(),
+                                    };
+                                    let thumb_size = match item.status {
+                                        QueueStatus::Pending => thumb.gray.size_vec2(),
+                                        _ => thumb.color.size_vec2(),
+                                    };
+                                    let thumb_aspect = if thumb_size.y > 0.0 {
+                                        thumb_size.x / thumb_size.y
+                                    } else {
+                                        1.0
+                                    };
+                                    let image_rect = fit_rect(
+                                        egui::Rect::from_center_size(
+                                            egui::pos2(rect.center().x, rect.top() + 40.0),
+                                            egui::vec2(64.0, 70.0),
+                                        ),
+                                        thumb_aspect,
+                                    );
+                                    painter.image(
+                                        id,
+                                        image_rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::WHITE,
+                                    );
+                                } else if self.thumbs.is_loading(&item.path) {
+                                    icons::paint_spinner(
+                                        ui,
+                                        egui::pos2(rect.center().x, rect.top() + 38.0),
+                                        10.0,
+                                        theme::ACCENT,
+                                    );
+                                }
+                                painter.text(
+                                    egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    (index + 1).to_string(),
+                                    egui::FontId::proportional(12.0),
+                                    theme::TEXT,
+                                );
+                                let badge = match item.status {
+                                    QueueStatus::Done { .. } => Some((Icon::Check, theme::SUCCESS)),
+                                    QueueStatus::Failed { .. } => {
+                                        Some((Icon::Warning, theme::ERROR))
+                                    }
+                                    QueueStatus::Processing => Some((Icon::Refresh, theme::ACCENT)),
+                                    _ if selected => Some((Icon::Check, theme::ACCENT)),
+                                    _ => None,
+                                };
+                                if let Some((icon, color)) = badge {
+                                    painter.circle_filled(
+                                        rect.right_bottom() - egui::vec2(15.0, 15.0),
+                                        10.0,
+                                        theme::WHITE,
+                                    );
+                                    icons::paint(
+                                        ui,
+                                        icon,
+                                        rect.right_bottom() - egui::vec2(15.0, 15.0),
+                                        15.0,
+                                        color,
+                                    );
+                                }
+                                if item.path.file_name().is_some() {
+                                    response.clone().on_hover_text(
+                                        item.path.file_name().unwrap().to_string_lossy(),
+                                    );
+                                }
+                                if response.clicked() {
+                                    select = Some(index);
+                                }
+                            }
+                            if let Some(index) = select {
+                                self.select_queue_item(ctx, index);
+                            }
+                        });
+                    });
+            }
+        });
     }
 
     fn t(&self, key: &str) -> &'static str {

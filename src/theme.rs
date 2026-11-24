@@ -56,7 +56,7 @@ pub fn card_frame() -> Frame {
         .fill(CARD)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(RADIUS_CARD)
-        .inner_margin(16.0)
+        .inner_margin(8.0)
         .shadow(Shadow {
             offset: [0, 2],
             blur: 8,
@@ -476,7 +476,7 @@ pub fn collapsing_card<R>(
             *open = !*open;
         }
         if *open {
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             result = Some(add_contents(ui));
         }
     });
