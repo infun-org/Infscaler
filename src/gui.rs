@@ -60,6 +60,7 @@ struct InfScalerApp {
     started: Option<Instant>,
     elapsed: Option<Duration>,
     split: f32,
+    dragging_split: bool,
     before: Option<egui::TextureHandle>,
     after: Option<egui::TextureHandle>,
     rx: Option<Receiver<WorkerMsg>>,
@@ -108,6 +109,7 @@ impl InfScalerApp {
             started: None,
             elapsed: None,
             split: 0.5,
+            dragging_split: false,
             before: None,
             after: None,
             rx: None,
@@ -976,13 +978,35 @@ impl InfScalerApp {
         let fitted =
             egui::Rect::from_center_size(fitted.center() + self.pan, fitted.size() * self.zoom);
 
+        // The split line lives in the visible part of the image, so it stays on
+        // screen and draggable at any zoom level.
+        let visible = fitted.intersect(rect);
+        let split_x = |split: f32| visible.left() + visible.width() * split;
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let near_line = response
+                .interact_pointer_pos()
+                .is_some_and(|pos| (pos.x - split_x(self.split)).abs() <= 14.0);
+            self.dragging_split = near_line || self.zoom <= 1.01;
+        }
+        if response.drag_stopped() {
+            self.dragging_split = false;
+        }
         if response.dragged_by(egui::PointerButton::Middle)
-            || (response.dragged() && self.zoom > 1.01)
+            || (response.dragged_by(egui::PointerButton::Primary) && !self.dragging_split)
         {
             self.pan += response.drag_delta();
-        } else if response.dragged() && self.zoom <= 1.01 {
+        } else if response.dragged_by(egui::PointerButton::Primary) && self.dragging_split {
             if let Some(pos) = response.interact_pointer_pos() {
-                self.split = ((pos.x - fitted.left()) / fitted.width()).clamp(0.02, 0.98);
+                if visible.width() > 1.0 {
+                    self.split = ((pos.x - visible.left()) / visible.width()).clamp(0.02, 0.98);
+                }
+            }
+        }
+        if let Some(pos) = response.hover_pos() {
+            if self.dragging_split || (pos.x - split_x(self.split)).abs() <= 14.0 {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            } else if self.zoom > 1.01 {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
         }
 
@@ -991,17 +1015,17 @@ impl InfScalerApp {
             painter.image(after_id, fitted, uv, egui::Color32::WHITE);
             let clip = egui::Rect::from_min_max(
                 fitted.min,
-                egui::pos2(fitted.left() + fitted.width() * self.split, fitted.bottom()),
+                egui::pos2(split_x(self.split), fitted.bottom()),
             );
             painter
                 .with_clip_rect(clip)
                 .image(before_id, fitted, uv, egui::Color32::WHITE);
-            let x = fitted.left() + fitted.width() * self.split;
+            let x = split_x(self.split);
             painter.line_segment(
-                [egui::pos2(x, fitted.top()), egui::pos2(x, fitted.bottom())],
+                [egui::pos2(x, visible.top()), egui::pos2(x, visible.bottom())],
                 egui::Stroke::new(2.0, egui::Color32::WHITE),
             );
-            painter.circle_filled(egui::pos2(x, fitted.center().y), 7.0, egui::Color32::WHITE);
+            painter.circle_filled(egui::pos2(x, visible.center().y), 7.0, egui::Color32::WHITE);
             paint_tag(
                 &painter,
                 egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
