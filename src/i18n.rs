@@ -35,19 +35,23 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ),
     (
         "missing_project_folder_long",
-        "Could not find the InfScaler folder (scripts/setup.sh). Start the app from the project directory, or set INFSCALER_HOME.",
-        "Không tìm thấy thư mục InfScaler (scripts/setup.sh). Hãy mở ứng dụng từ thư mục dự án, hoặc đặt INFSCALER_HOME.",
+        "Could not find InfScaler's files. Open the app from the folder where it was installed.",
+        "Không tìm thấy dữ liệu của InfScaler. Hãy mở ứng dụng từ thư mục đã cài.",
     ),
     (
         "no_models_yet",
-        "No models yet. Run scripts/setup.sh, then Reload.",
-        "Chưa có model. Chạy scripts/setup.sh, rồi bấm Tải lại.",
+        "No enhancement styles yet. Run setup, then click Reload list.",
+        "Chưa có kiểu làm nét. Hãy chạy bước cài đặt, rồi bấm Tải lại danh sách.",
     ),
-    ("upscaling_pct", "Upscaling {}%", "Đang xử lý {}%"),
+    (
+        "upscaling_pct",
+        "Enhancing {}%",
+        "Đang xử lý {}%",
+    ),
     ("saved", "Saved {} ({}×{})", "Đã lưu {} ({}×{})"),
     (
         "saved_preview_failed",
-        "Saved the file, but the preview failed: {}",
+        "Saved the file, but the preview could not be shown: {}",
         "Đã lưu file, nhưng không xem trước được: {}",
     ),
     ("failed", "Failed", "Thất bại"),
@@ -59,12 +63,12 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ),
     (
         "thread_exited",
-        "The processing thread exited unexpectedly.",
-        "Luồng xử lý đã dừng đột ngột.",
+        "Processing stopped unexpectedly.",
+        "Quá trình xử lý đã dừng đột ngột.",
     ),
     (
         "could_not_read_size",
-        "Could not read image size: {}",
+        "Could not read the photo size: {}",
         "Không đọc được kích thước ảnh: {}",
     ),
     ("loaded_size", "Loaded {}×{}", "Đã mở {}×{}"),
@@ -79,28 +83,28 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ),
     (
         "no_model_selected",
-        "No model selected. Run scripts/setup.sh.",
-        "Chưa chọn model. Hãy chạy scripts/setup.sh.",
+        "No style selected. Run setup first.",
+        "Chưa chọn kiểu làm nét. Hãy chạy bước cài đặt trước.",
     ),
     (
         "model_files_missing",
-        "Model files for {} are missing ({}).",
-        "Thiếu file model {} ({}).",
+        "Files for the {} style are missing ({}).",
+        "Thiếu file của kiểu {} ({}).",
     ),
     (
         "choose_input",
-        "Choose an input image first.",
-        "Hãy chọn ảnh nguồn trước.",
+        "Please choose a photo first.",
+        "Hãy chọn một ảnh trước.",
     ),
     (
         "choose_output",
-        "Choose an output path.",
-        "Hãy chọn đường dẫn lưu ảnh.",
+        "Please choose where to save the photo.",
+        "Hãy chọn nơi lưu ảnh.",
     ),
     (
         "tile_size_invalid",
-        "Tile size must be 0 (auto) or at least 32.",
-        "Kích thước ô phải là 0 (tự động) hoặc ít nhất 32.",
+        "Piece size must be 0 (automatic) or at least 32.",
+        "Kích thước mảnh phải là 0 (tự động) hoặc từ 32 trở lên.",
     ),
     ("starting", "Starting…", "Đang bắt đầu…"),
     ("cancelling", "Cancelling…", "Đang hủy…"),
@@ -109,8 +113,16 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
         "local photo enhancement",
         "làm nét ảnh ngay trên máy",
     ),
-    ("reload_models", "Reload models", "Tải lại model"),
-    ("model_count", "{} model(s)", "{} model"),
+    (
+        "reload_models",
+        "Reload list",
+        "Tải lại danh sách",
+    ),
+    (
+        "model_count",
+        "{} style(s)",
+        "{} kiểu",
+    ),
     ("photo", "Photo", "Ảnh"),
     ("open", "Open…", "Mở…"),
     (
@@ -129,12 +141,16 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
         "Choose output folder",
         "Chọn thư mục lưu",
     ),
-    ("onnx_threads", "ONNX threads", "Luồng ONNX"),
+    (
+        "onnx_threads",
+        "Processing threads",
+        "Số luồng xử lý",
+    ),
     ("open_folder", "Open folder…", "Mở thư mục…"),
     ("open_image_folder", "Open image folder", "Mở thư mục ảnh"),
     (
         "queued_top_level",
-        "Queued {} top-level images",
+        "Queued {} images",
         "Đã thêm {} ảnh (chỉ thư mục hiện tại)",
     ),
     ("queue_count", "Queue: {} image(s)", "Hàng đợi: {} ảnh"),
@@ -145,33 +161,49 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ),
     ("preset_people", "People", "Người"),
     ("preset_fast", "Fast", "Nhanh"),
-    ("jobs_one", "1 job", "1 ảnh một lúc"),
-    ("jobs_n", "{} jobs", "{} ảnh song song"),
+    (
+        "jobs_one",
+        "1 photo at a time",
+        "1 ảnh một lúc",
+    ),
+    (
+        "jobs_n",
+        "{} photos at once",
+        "{} ảnh cùng lúc",
+    ),
     ("and_more", "… and {} more", "… và {} ảnh nữa"),
     (
         "process_queued",
         "Process queued folder",
         "Xử lý hàng đợi",
     ),
-    ("model", "Model", "Model"),
+    (
+        "model",
+        "Style",
+        "Kiểu làm nét",
+    ),
     (
         "auto_choose",
         "Auto (choose per image)",
         "Tự động (chọn theo ảnh)",
     ),
     ("none", "none", "không có"),
-    ("broken_suffix", " · BROKEN", " · hỏng"),
+    (
+        "broken_suffix",
+        " · disabled",
+        " · tạm tắt",
+    ),
     (
         "no_models_in_folder",
-        "No .param + .bin or .onnx models in models/",
-        "Không có model .param + .bin hoặc .onnx trong thư mục models/",
+        "No enhancement styles are installed yet. Run setup, then click Reload list.",
+        "Chưa có kiểu làm nét nào. Hãy chạy bước cài đặt, rồi bấm Tải lại danh sách.",
     ),
-    ("broken_reason", "BROKEN: {}", "Hỏng: {}"),
     (
-        "auto_hint",
-        "People → RealWebPhoto DAT · no faces → Nomos2 OTF",
-        "Người → DAT · không có mặt → Nomos2 OTF",
+        "broken_reason",
+        "Disabled: {}",
+        "Đã tắt: {}",
     ),
+
     ("output_size", "Output size", "Kích thước đầu ra"),
     (
         "original_sharpen",
@@ -180,55 +212,75 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ),
     (
         "original_sharpen_tip",
-        "Recommended: enhance, then scale back to the original pixel size",
-        "Nên dùng: làm nét rồi thu về đúng kích thước gốc",
+        "Recommended: sharpen while keeping the original size",
+        "Nên dùng: làm nét nhưng giữ nguyên kích thước",
     ),
     (
         "hint_keep_size",
-        "Runs the {}× model, then Lanczos3 back to the original pixels.",
-        "Chạy model {}×, rồi thu về kích thước gốc bằng Lanczos3.",
+        "Sharpens the photo, then brings it back to the original size.",
+        "Làm nét ảnh rồi đưa về đúng kích thước ban đầu.",
     ),
     (
         "hint_native",
-        "Writes the {}× model output.",
-        "Ghi trực tiếp kết quả model {}×.",
+        "Saves the photo enlarged {}×.",
+        "Lưu ảnh phóng to {} lần.",
     ),
     (
         "hint_rescale",
-        "Runs the {}× model, then Lanczos3 to {}× the original.",
-        "Chạy model {}×, rồi đổi kích thước thành {}× ảnh gốc bằng Lanczos3.",
+        "Sharpens the photo, then resizes it to {}× the original.",
+        "Làm nét rồi đổi thành {} lần kích thước ảnh gốc.",
     ),
-    ("tile", "Tile", "Ô cắt"),
-    ("tile_auto", "0 = auto", "0 = tự động"),
-    ("overlap", "Overlap", "Vùng chồng"),
-    ("onnx_seams", "ONNX seams", "Đường nối ONNX"),
+    (
+        "tile",
+        "Piece size",
+        "Chia nhỏ ảnh",
+    ),
+    (
+        "tile_auto",
+        "0 = automatic",
+        "0 = tự động",
+    ),
+    (
+        "overlap",
+        "Edge overlap",
+        "Độ chồng mép",
+    ),
+    (
+        "onnx_seams",
+        "smooths the joins",
+        "làm mượt chỗ nối",
+    ),
     (
         "tile_hint",
-        "NCNN uses the Vulkan tile. ONNX blends a Hann ramp on the CPU. DAT, DRCT, and SCUNet use their fixed input size and at least 48 px of overlap.",
-        "NCNN dùng ô cắt Vulkan. ONNX hòa đường nối kiểu Hann trên CPU. DAT, DRCT và SCUNet dùng kích thước đầu vào cố định và chồng ít nhất 48 px.",
+        "Large photos are processed in pieces so the computer is not overloaded. If you see lines where pieces meet, increase the edge overlap.",
+        "Ảnh lớn được xử lý từng mảnh để máy không bị quá tải. Nếu thấy vệt ở chỗ nối, hãy tăng độ chồng mép.",
     ),
-    ("gpu", "GPU", "GPU"),
+    (
+        "gpu",
+        "Graphics card",
+        "Card đồ họa",
+    ),
     ("auto", "Auto", "Tự động"),
     ("cpu", "CPU", "CPU"),
     (
         "cpu_hint",
-        "CPU runs ONNX models. NCNN binaries reject -g -1.",
-        "CPU chạy các model ONNX. Bộ xử lý NCNN không nhận -g -1.",
+        "Only the fast styles use the graphics card; the others run on the processor.",
+        "Chỉ các kiểu nhanh dùng card đồ họa; các kiểu còn lại chạy bằng bộ xử lý của máy.",
     ),
     (
         "tta",
-        "TTA (8 flips, slower)",
-        "TTA (8 hướng lật, chậm hơn)",
+        "Extra-careful mode (much slower)",
+        "Xử lý kỹ hơn (chậm hơn nhiều)",
     ),
     (
         "tta_onnx_hint",
-        "This model runs on the CPU through ONNX Runtime. TTA stays off.",
-        "Model này chạy trên CPU qua ONNX Runtime. TTA được tắt.",
+        "Extra-careful mode is only available for the graphics card styles.",
+        "Chế độ xử lý kỹ chỉ có ở các kiểu dùng card đồ họa.",
     ),
     (
         "denoise_first",
-        "Denoise first (SCUNet)",
-        "Khử nhiễu trước (SCUNet)",
+        "Remove grain first",
+        "Khử nhiễu hạt trước",
     ),
     (
         "face_restore",
@@ -238,8 +290,8 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ("face_strength", "Face strength", "Mức phục hồi mặt"),
     (
         "fast_auto",
-        "Fast Auto (Nomos8kSC on GPU)",
-        "Tự động nhanh (Nomos8kSC trên GPU)",
+        "Fast Auto (uses the graphics card)",
+        "Tự động nhanh (dùng card đồ họa)",
     ),
     ("save_as", "Save as", "Lưu thành"),
     ("browse", "Browse", "Chọn…"),
@@ -261,7 +313,11 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
     ("after", "After", "Sau"),
     ("original", "Original", "Gốc"),
     ("language", "Language", "Ngôn ngữ"),
-    ("gpu_n", "GPU {}", "GPU {}"),
+    (
+        "gpu_n",
+        "Graphics card {}",
+        "Card đồ họa {}",
+    ),
     // Model friendly names keep the short name in parentheses.
     (
         "model_nomos2",
@@ -303,6 +359,121 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
         "High quality, disabled (DRCT-L)",
         "Chất lượng cao, đã tắt (DRCT-L)",
     ),
+    (
+        "desc_auto",
+        "Picks a style for each photo by itself: photos with people get the natural-look style (slow, about 80–110 seconds per small photo), other photos get the detailed style (about 17–34 seconds).",
+        "Tự chọn kiểu phù hợp cho từng ảnh: ảnh có người dùng kiểu tự nhiên (chậm, khoảng 80–110 giây mỗi ảnh nhỏ), ảnh khác dùng kiểu chi tiết (khoảng 17–34 giây).",
+    ),
+    (
+        "desc_nomos2",
+        "Best for animals, landscapes and everyday photos; brings out fur, hair and fine texture. Medium speed, about 17–34 seconds per small photo.",
+        "Hợp với ảnh động vật, phong cảnh và ảnh đời thường; làm rõ lông, tóc và chi tiết nhỏ. Tốc độ vừa, khoảng 17–34 giây mỗi ảnh nhỏ.",
+    ),
+    (
+        "desc_dat2",
+        "Best for portraits and photos of people; skin and faces stay natural, without a plastic look. Slow, about 80–110 seconds per small photo.",
+        "Hợp với ảnh chân dung và ảnh có người; da và khuôn mặt giữ được vẻ tự nhiên, không bị bệt. Chậm, khoảng 80–110 giây mỗi ảnh nhỏ.",
+    ),
+    (
+        "desc_span",
+        "For a quick look before choosing a better style; the result is less sharp. Very fast, about 1 second per small photo.",
+        "Dùng để xem thử nhanh trước khi chọn kiểu tốt hơn; ảnh ra kém nét hơn. Rất nhanh, khoảng 1 giây mỗi ảnh nhỏ.",
+    ),
+    (
+        "desc_nomos8k",
+        "Quick, clean sharpening for most photos. Needs the graphics card. Fast, about 8–13 seconds per small photo.",
+        "Làm nét nhanh, sạch, hợp với đa số ảnh. Cần card đồ họa. Nhanh, khoảng 8–13 giây mỗi ảnh nhỏ.",
+    ),
+    (
+        "desc_realesrgan",
+        "A well-known classic style; makes photos clean and smooth but can look a bit painted. Needs the graphics card. Fast, about 8–13 seconds per small photo.",
+        "Kiểu cổ điển quen thuộc; ảnh sạch, mịn nhưng đôi khi trông hơi giống tranh vẽ. Cần card đồ họa. Nhanh, khoảng 8–13 giây mỗi ảnh nhỏ.",
+    ),
+    (
+        "desc_ultrasharp",
+        "Makes edges and details very crisp. Personal use only, not for commercial use. Needs the graphics card. Fast, about 8–13 seconds per small photo.",
+        "Làm đường nét và chi tiết rất sắc. Chỉ dùng cá nhân, không dùng thương mại. Cần card đồ họa. Nhanh, khoảng 8–13 giây mỗi ảnh nhỏ.",
+    ),
+    (
+        "desc_scunet",
+        "Removes grain and noise from dark or old photos without enlarging them; usually used as a step before sharpening.",
+        "Khử nhiễu hạt cho ảnh chụp thiếu sáng hoặc ảnh cũ, không phóng to ảnh; thường dùng làm bước trước khi làm nét.",
+    ),
+    (
+        "desc_drct",
+        "Temporarily disabled because it currently makes photos blurry. Please choose another style.",
+        "Tạm thời tắt vì hiện đang làm ảnh bị mờ. Hãy chọn kiểu khác.",
+    ),
+    (
+        "stage_enhancing",
+        "Sharpening the photo…",
+        "Đang làm nét ảnh…",
+    ),
+    (
+        "stage_denoising",
+        "Removing grain…",
+        "Đang khử nhiễu…",
+    ),
+    (
+        "stage_resizing",
+        "Resizing…",
+        "Đang đổi kích thước…",
+    ),
+    (
+        "stage_saving",
+        "Saving…",
+        "Đang lưu ảnh…",
+    ),
+    (
+        "stage_auto",
+        "Picked style: {}",
+        "Đã chọn kiểu: {}",
+    ),
+    (
+        "stage_gpu_fallback",
+        "The graphics card gave a blank result; retrying on the processor…",
+        "Card đồ họa cho ảnh trống; đang làm lại bằng bộ xử lý…",
+    ),
+    (
+        "technical_details",
+        "Technical details",
+        "Thông tin kỹ thuật",
+    ),
+    (
+        "tech_model",
+        "Model: {}",
+        "Model: {}",
+    ),
+    (
+        "tech_backend",
+        "Engine: {}",
+        "Bộ chạy: {}",
+    ),
+    (
+        "tech_scale",
+        "Native scale: {}×",
+        "Tỉ lệ gốc của model: {}×",
+    ),
+    (
+        "tech_license",
+        "License: {}",
+        "Giấy phép: {}",
+    ),
+    (
+        "tech_auto",
+        "People: 4xRealWebPhoto_v4_dat2 · others: 4xNomos2_otf_esrgan · Fast Auto: 4xNomos8kSC",
+        "Có người: 4xRealWebPhoto_v4_dat2 · ảnh khác: 4xNomos2_otf_esrgan · Tự động nhanh: 4xNomos8kSC",
+    ),
+    (
+        "desc_custom",
+        "A style you added yourself.",
+        "Kiểu do bạn tự thêm.",
+    ),
+    (
+        "threads_hint",
+        "Fewer threads keep the computer smooth for other work; more threads finish a little faster.",
+        "Ít luồng thì máy vẫn mượt để làm việc khác; nhiều luồng thì xong nhanh hơn một chút.",
+    ),
 ];
 
 /// Fill `{}` placeholders in a template, left to right.
@@ -334,6 +505,47 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         }
     }
     "[?]"
+}
+
+/// Plain-language status for an engine stage line (the raw line goes to the log).
+pub fn plain_stage(lang: Lang, raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("Auto chose ") {
+        let name = rest.split(' ').next().unwrap_or(rest);
+        let shown = model_display_name(lang, name).unwrap_or_else(|| name.to_string());
+        return tr(lang, "stage_auto", &[&shown]);
+    }
+    if s.starts_with("Denoising") {
+        return t(lang, "stage_denoising").to_string();
+    }
+    if s.starts_with("Enhancing") || s.starts_with("Upscaling with") {
+        return t(lang, "stage_enhancing").to_string();
+    }
+    if s.starts_with("Lanczos3") {
+        return t(lang, "stage_resizing").to_string();
+    }
+    if s.starts_with("Saving output") {
+        return t(lang, "stage_saving").to_string();
+    }
+    if s.starts_with("NCNN output was black") {
+        return t(lang, "stage_gpu_fallback").to_string();
+    }
+    localize_runtime(lang, raw)
+}
+
+pub fn model_description(lang: Lang, name: &str) -> Option<&'static str> {
+    let key = match name {
+        "4xNomos2_otf_esrgan" => "desc_nomos2",
+        "4xRealWebPhoto_v4_dat2" => "desc_dat2",
+        "spanx4_ch48" => "desc_span",
+        "4xNomos8kSC" => "desc_nomos8k",
+        "realesrgan-x4plus" => "desc_realesrgan",
+        "ultrasharp-4x" => "desc_ultrasharp",
+        "scunet_color_real_psnr" => "desc_scunet",
+        "4xNomos2_hq_drct-l" => "desc_drct",
+        _ => return None,
+    };
+    Some(t(lang, key))
 }
 
 pub fn model_display_name(lang: Lang, name: &str) -> Option<String> {
@@ -387,7 +599,7 @@ pub fn localize_runtime(lang: Lang, text: &str) -> String {
         }
     }
 
-    if let Some(value) = take_prefix(trimmed, &["Upscaling ", "Đang xử lý "]) {
+    if let Some(value) = take_prefix(trimmed, &["Enhancing ", "Upscaling ", "Đang xử lý "]) {
         if value.ends_with('%') {
             return tr(lang, "upscaling_pct", &[value.trim_end_matches('%')]);
         }
@@ -395,6 +607,7 @@ pub fn localize_runtime(lang: Lang, text: &str) -> String {
     if let Some(rest) = take_prefix(
         trimmed,
         &[
+            "Saved the file, but the preview could not be shown: ",
             "Saved the file, but the preview failed: ",
             "Đã lưu file, nhưng không xem trước được: ",
         ],
@@ -414,6 +627,7 @@ pub fn localize_runtime(lang: Lang, text: &str) -> String {
     if let Some(rest) = take_prefix(
         trimmed,
         &[
+            "Could not read the photo size: ",
             "Could not read image size: ",
             "Không đọc được kích thước ảnh: ",
         ],
@@ -435,17 +649,20 @@ pub fn localize_runtime(lang: Lang, text: &str) -> String {
         .split_whitespace()
         .next()
         .and_then(|w| w.parse::<usize>().ok())
-        .filter(|_| {
-            trimmed.ends_with("model(s)")
-                || trimmed.ends_with(" model")
-                || trimmed.ends_with(" model(s)")
-        })
+        .filter(|_| true)
     {
-        if trimmed == format!("{n} model(s)") || trimmed == format!("{n} model") {
+        if [
+            format!("{n} style(s)"),
+            format!("{n} kiểu"),
+            format!("{n} model(s)"),
+        ]
+        .contains(&trimmed.to_string())
+        {
             return tr(lang, "model_count", &[&n.to_string()]);
         }
     }
-    if let Some(rest) = take_prefix(trimmed, &["BROKEN: ", "Hỏng: "]) {
+    if let Some(rest) = take_prefix(trimmed, &["Disabled: ", "Đã tắt: ", "BROKEN: ", "Hỏng: "])
+    {
         return tr(lang, "broken_reason", &[rest]);
     }
     if let Some(rest) = take_prefix(trimmed, &["Model files for ", "Thiếu file model "]) {
@@ -663,11 +880,11 @@ mod tests {
             "Starting…",
             "Failed",
             "Batch complete",
-            "Upscaling 42.5%",
+            "Enhancing 42.5%",
             "Saved /tmp/out.png (800×600)",
             "Loaded 1920×1080",
-            "Queued 12 top-level images",
-            "3 model(s)",
+            "Queued 12 images",
+            "3 style(s)",
             "Auto chose 4xNomos2_otf_esrgan (general)",
             "Saving output",
             "Restoring 2 face(s) with RestoreFormerPlusPlus",
@@ -682,6 +899,95 @@ mod tests {
         assert_eq!(
             localize_runtime(Lang::Vi, "something-unknown"),
             "something-unknown"
+        );
+    }
+
+    #[test]
+    fn every_model_and_auto_has_plain_description() {
+        let names = [
+            "4xNomos2_otf_esrgan",
+            "4xRealWebPhoto_v4_dat2",
+            "spanx4_ch48",
+            "4xNomos8kSC",
+            "realesrgan-x4plus",
+            "ultrasharp-4x",
+            "scunet_color_real_psnr",
+            "4xNomos2_hq_drct-l",
+        ];
+        let jargon = [
+            "ONNX",
+            "PSNR",
+            "checkpoint",
+            "opset",
+            "spandrel",
+            "tile",
+            "Lanczos",
+            "NCNN",
+            "Vulkan",
+        ];
+        let mut descs: Vec<&str> = vec![t(Lang::En, "desc_auto"), t(Lang::Vi, "desc_auto")];
+        for name in names {
+            for lang in Lang::all() {
+                let d = model_description(lang, name).expect(name);
+                assert!(!d.is_empty() && d != "[?]", "{name}");
+                descs.push(d);
+            }
+        }
+        for d in descs {
+            for j in jargon {
+                assert!(
+                    !d.to_lowercase().contains(&j.to_lowercase()),
+                    "jargon {j} in {d}"
+                );
+            }
+        }
+        assert!(t(Lang::Vi, "desc_ultrasharp").contains("không dùng thương mại"));
+        assert!(t(Lang::Vi, "desc_drct").contains("tắt"));
+        assert!(model_description(Lang::Vi, "unknown").is_none());
+    }
+
+    #[test]
+    fn gui_keys_resolve_in_both_languages() {
+        for key in [
+            "desc_auto",
+            "desc_custom",
+            "stage_enhancing",
+            "stage_saving",
+            "stage_auto",
+            "technical_details",
+            "tech_model",
+            "tech_backend",
+            "tech_scale",
+            "tech_license",
+            "tech_auto",
+            "threads_hint",
+            "model",
+            "gpu",
+            "tile",
+            "tile_hint",
+            "cpu_hint",
+            "tta",
+            "tta_onnx_hint",
+            "hint_keep_size",
+            "hint_native",
+            "hint_rescale",
+            "onnx_threads",
+        ] {
+            assert_ne!(t(Lang::En, key), "[?]", "{key}");
+            assert_ne!(t(Lang::Vi, key), "[?]", "{key}");
+        }
+    }
+
+    #[test]
+    fn engine_stages_become_plain_text() {
+        let s = plain_stage(
+            Lang::Vi,
+            "Enhancing with 4xNomos2_otf_esrgan (ONNX Runtime CPU, 4 threads, tile 128, overlap 16)",
+        );
+        assert_eq!(s, "Đang làm nét ảnh…");
+        assert_eq!(
+            plain_stage(Lang::Vi, "Auto chose 4xNomos2_otf_esrgan (general)"),
+            "Đã chọn kiểu: Động vật & chung, chi tiết nhất (Nomos2 OTF)"
         );
     }
 

@@ -211,7 +211,8 @@ impl InfScalerApp {
                     self.status = self.tr("upscaling_pct", &[&format!("{p:.1}")]);
                 }
                 Ok(WorkerMsg::Event(EngineEvent::Stage(text))) => {
-                    self.status = i18n::localize_runtime(self.lang, &text);
+                    self.status = i18n::plain_stage(self.lang, &text);
+                    push_log(&mut self.log, &text);
                 }
                 Ok(WorkerMsg::Event(EngineEvent::Log(line))) => {
                     if let Some((done, total)) = line
@@ -636,7 +637,8 @@ impl InfScalerApp {
             }
         }
         ui.horizontal(|ui| {
-            ui.label(self.t("onnx_threads"));
+            ui.label(self.t("onnx_threads"))
+                .on_hover_text(self.t("threads_hint"));
             ui.add(egui::DragValue::new(&mut self.batch_threads).range(1..=12));
         });
         if ui.button(self.t("open_folder")).clicked() && !self.running {
@@ -742,32 +744,52 @@ impl InfScalerApp {
                     ui.label(self.t("no_models_in_folder"));
                 }
             });
-        if let Some(model) = self.selected() {
-            if let Some(reason) = &model.broken_reason {
-                ui.label(
-                    egui::RichText::new(self.tr("broken_reason", &[reason]))
-                        .color(egui::Color32::from_rgb(220, 90, 70)),
-                );
-            }
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} · {}×  ·  {}",
-                    model.kind().label(),
-                    model.scale,
-                    model.license
-                ))
-                .weak()
-                .size(12.0),
-            );
-            if !model.notes.is_empty() {
-                ui.label(egui::RichText::new(&model.notes).weak().size(12.0));
-            }
-            if !model.source.is_empty() {
-                ui.label(egui::RichText::new(&model.source).weak().size(11.0));
-            }
-        }
+        let lang = self.lang;
         if self.model_idx == self.models.len() {
-            ui.label(egui::RichText::new(self.t("auto_hint")).weak().size(12.0));
+            ui.label(egui::RichText::new(self.t("desc_auto")).size(12.5));
+            egui::CollapsingHeader::new(self.t("technical_details"))
+                .id_salt("tech-auto")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "tech_auto"))
+                            .weak()
+                            .size(11.5),
+                    );
+                });
+        } else if let Some(model) = self.selected() {
+            let desc = i18n::model_description(lang, &model.name)
+                .unwrap_or_else(|| i18n::t(lang, "desc_custom"));
+            let color = if model.is_broken() {
+                egui::Color32::from_rgb(220, 120, 100)
+            } else {
+                ui.visuals().text_color()
+            };
+            ui.label(egui::RichText::new(desc).size(12.5).color(color));
+            egui::CollapsingHeader::new(i18n::t(lang, "technical_details"))
+                .id_salt("tech-model")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let small = |ui: &mut egui::Ui, text: String| {
+                        ui.label(egui::RichText::new(text).weak().size(11.5));
+                    };
+                    small(ui, i18n::tr(lang, "tech_model", &[&model.name]));
+                    small(ui, i18n::tr(lang, "tech_backend", &[model.kind().label()]));
+                    small(
+                        ui,
+                        i18n::tr(lang, "tech_scale", &[&model.scale.to_string()]),
+                    );
+                    small(ui, i18n::tr(lang, "tech_license", &[&model.license]));
+                    if let Some(reason) = &model.broken_reason {
+                        small(ui, i18n::tr(lang, "broken_reason", &[reason]));
+                    }
+                    if !model.notes.is_empty() {
+                        small(ui, model.notes.clone());
+                    }
+                    if !model.source.is_empty() {
+                        small(ui, model.source.clone());
+                    }
+                });
         }
 
         ui.add_space(8.0);
