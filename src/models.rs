@@ -45,19 +45,8 @@ impl ModelInfo {
 
 impl ModelInfo {
     /// Friendly label for the GUI: "what it is for (short model name)".
-    pub fn display_name(&self) -> String {
-        let (friendly, short) = match self.name.as_str() {
-            "4xNomos2_otf_esrgan" => ("Animals & general, best detail", "Nomos2 OTF"),
-            "4xRealWebPhoto_v4_dat2" => ("People, natural look (slow)", "DAT2"),
-            "spanx4_ch48" => ("Quick preview", "SPAN"),
-            "4xNomos8kSC" => ("Fast, GPU", "Nomos8kSC"),
-            "realesrgan-x4plus" => ("Classic, GPU", "Real-ESRGAN x4+"),
-            "ultrasharp-4x" => ("Extra sharp, GPU, non-commercial", "UltraSharp"),
-            "scunet_color_real_psnr" => ("Denoise", "SCUNet"),
-            "4xNomos2_hq_drct-l" => ("High quality, disabled", "DRCT-L"),
-            _ => return self.name.clone(),
-        };
-        format!("{friendly} ({short})")
+    pub fn display_name(&self, lang: crate::i18n::Lang) -> String {
+        crate::i18n::model_display_name(lang, &self.name).unwrap_or_else(|| self.name.clone())
     }
 
     pub fn kind(&self) -> BackendKind {

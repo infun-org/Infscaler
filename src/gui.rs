@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::engine::{self, EngineEvent, GpuChoice, GpuDevice, JobOptions, RunOutcome};
+use crate::i18n::{self, Lang};
 use crate::models::{self, ModelInfo};
 use crate::paths;
 
@@ -81,6 +82,7 @@ struct InfScalerApp {
     batch_preset: String,
     batch_output_dir: Option<PathBuf>,
     batch_control: Option<Arc<crate::batch::BatchControl>>,
+    lang: Lang,
     zoom: f32,
     pan: egui::Vec2,
 }
@@ -88,6 +90,8 @@ struct InfScalerApp {
 impl InfScalerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_style(&cc.egui_ctx);
+        install_ui_fonts(&cc.egui_ctx);
+        let lang = i18n::load_lang();
         let root = paths::find_root();
         let mut app = Self {
             root,
@@ -108,7 +112,7 @@ impl InfScalerApp {
             output_path: String::new(),
             input_size: None,
             output_size: None,
-            status: "Drop a photo, or open one.".into(),
+            status: i18n::t(lang, "drop_or_open").to_string(),
             error: String::new(),
             log: String::new(),
             progress: 0.0,
@@ -130,15 +134,16 @@ impl InfScalerApp {
             batch_preset: "general".into(),
             batch_output_dir: None,
             batch_control: None,
+            lang,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
         };
         app.reload_models();
         app.spawn_gpu_probe();
         if app.root.is_none() {
-            app.error = "Could not find the InfScaler folder (scripts/setup.sh). Start the app from the project directory, or set INFSCALER_HOME.".into();
+            app.error = i18n::t(lang, "missing_project_folder_long").to_string();
         } else if app.models.is_empty() {
-            app.status = "No models yet. Run scripts/setup.sh, then Reload.".into();
+            app.status = i18n::t(lang, "no_models_yet").to_string();
         }
         app
     }
@@ -203,10 +208,10 @@ impl InfScalerApp {
             match rx.try_recv() {
                 Ok(WorkerMsg::Event(EngineEvent::Percent(p))) => {
                     self.progress = p;
-                    self.status = format!("Upscaling {p:.1}%");
+                    self.status = self.tr("upscaling_pct", &[&format!("{p:.1}")]);
                 }
                 Ok(WorkerMsg::Event(EngineEvent::Stage(text))) => {
-                    self.status = text;
+                    self.status = i18n::localize_runtime(self.lang, &text);
                 }
                 Ok(WorkerMsg::Event(EngineEvent::Log(line))) => {
                     if let Some((done, total)) = line
@@ -229,18 +234,20 @@ impl InfScalerApp {
                     self.progress = 100.0;
                     self.output_size = Some(outcome.output_size);
                     self.error.clear();
-                    self.status = format!(
-                        "Saved {} ({}×{})",
-                        outcome.output.display(),
-                        outcome.output_size.0,
-                        outcome.output_size.1
+                    self.status = self.tr(
+                        "saved",
+                        &[
+                            &outcome.output.display().to_string(),
+                            &outcome.output_size.0.to_string(),
+                            &outcome.output_size.1.to_string(),
+                        ],
                     );
                     match engine::make_preview(&outcome.output, 1600) {
                         Ok((rgba, w, h)) => {
                             self.after = Some(load_texture(ctx, "after", &rgba, w, h));
                         }
                         Err(err) => {
-                            self.error = format!("Saved the file, but the preview failed: {err:#}");
+                            self.error = self.tr("saved_preview_failed", &[&format!("{err:#}")]);
                         }
                     }
                 }
@@ -249,23 +256,23 @@ impl InfScalerApp {
                     if let Some(start) = self.started {
                         self.elapsed = Some(start.elapsed());
                     }
-                    self.status = "Failed".into();
-                    self.error = message;
+                    self.status = self.t("failed").to_string();
+                    self.error = i18n::localize_runtime(self.lang, &message);
                 }
                 Ok(WorkerMsg::BatchFinished(result)) => {
                     self.running = false;
                     self.batch_control = None;
                     self.status = match result {
-                        Ok(()) => "Batch complete".into(),
-                        Err(e) => format!("Batch stopped: {e}"),
+                        Ok(()) => self.t("batch_complete").to_string(),
+                        Err(e) => self.tr("batch_stopped", &[&e]),
                     };
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if self.running {
                         self.running = false;
-                        self.status = "Failed".into();
-                        self.error = "The processing thread exited unexpectedly.".into();
+                        self.status = self.t("failed").to_string();
+                        self.error = self.t("thread_exited").to_string();
                     }
                     break;
                 }
@@ -290,14 +297,14 @@ impl InfScalerApp {
                     Ok(size) => self.input_size = Some(size),
                     Err(err) => {
                         self.input_size = None;
-                        self.error = format!("Could not read image size: {err}");
+                        self.error = self.tr("could_not_read_size", &[&err.to_string()]);
                     }
                 }
                 self.output_path = engine::default_output_path(&path).display().to_string();
                 self.input_path = path.display().to_string();
                 self.status = match self.input_size {
-                    Some((w, h)) => format!("Loaded {w}×{h}"),
-                    None => "Loaded".into(),
+                    Some((w, h)) => self.tr("loaded_size", &[&w.to_string(), &h.to_string()]),
+                    None => self.t("loaded").to_string(),
                 };
             }
             Err(err) => {
@@ -308,8 +315,8 @@ impl InfScalerApp {
 
     fn pick_input(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new()
-            .set_title("Open photo")
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+            .set_title(self.t("open_photo"))
+            .add_filter(self.t("images_filter"), &["png", "jpg", "jpeg", "webp"])
             .pick_file();
         if let Some(path) = picked {
             self.load_input(ctx, path);
@@ -318,7 +325,7 @@ impl InfScalerApp {
 
     fn pick_output(&mut self) {
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Save enhanced image")
+            .set_title(self.t("save_enhanced"))
             .add_filter("PNG", &["png"])
             .add_filter("JPEG", &["jpg", "jpeg"])
             .add_filter("WebP", &["webp"]);
@@ -333,33 +340,29 @@ impl InfScalerApp {
     fn start_job(&mut self) {
         self.error.clear();
         let Some(root) = self.root.clone() else {
-            self.error = "Project folder not found.".into();
+            self.error = self.t("project_folder_missing").to_string();
             return;
         };
         let automatic = self.model_idx == self.models.len();
         let model = self.selected().cloned();
         if !automatic && model.is_none() {
-            self.error = "No model selected. Run scripts/setup.sh.".into();
+            self.error = self.t("no_model_selected").to_string();
             return;
         }
         if let Some(model) = model.as_ref().filter(|_| !automatic) {
             if !model.files_present() {
-                self.error = format!(
-                    "Model files for {} are missing ({}).",
-                    model.name,
-                    model.location()
-                );
+                self.error = self.tr("model_files_missing", &[&model.name, &model.location()]);
                 return;
             }
         }
         let input = PathBuf::from(self.input_path.trim());
         let output = PathBuf::from(self.output_path.trim());
         if input.as_os_str().is_empty() || !input.is_file() {
-            self.error = "Choose an input image first.".into();
+            self.error = self.t("choose_input").to_string();
             return;
         }
         if output.as_os_str().is_empty() {
-            self.error = "Choose an output path.".into();
+            self.error = self.t("choose_output").to_string();
             return;
         }
         let gpu = match GpuChoice::parse(&self.gpu) {
@@ -370,7 +373,7 @@ impl InfScalerApp {
             }
         };
         if self.tile != 0 && self.tile < 32 {
-            self.error = "Tile size must be 0 (auto) or at least 32.".into();
+            self.error = self.t("tile_size_invalid").to_string();
             return;
         }
 
@@ -412,7 +415,7 @@ impl InfScalerApp {
         self.elapsed = None;
         self.after = None;
         self.log.clear();
-        self.status = "Starting…".into();
+        self.status = self.t("starting").to_string();
 
         thread::spawn(move || {
             let tx_events = tx.clone();
@@ -442,12 +445,12 @@ impl InfScalerApp {
                     .status();
             }
         }
-        self.status = "Cancelling…".into();
+        self.status = self.t("cancelling").to_string();
     }
 
     fn start_batch(&mut self) {
         let Some(root) = self.root.clone() else {
-            self.error = "Project folder not found.".into();
+            self.error = self.t("project_folder_missing").to_string();
             return;
         };
         let Some(first) = self.queued.first().cloned() else {
@@ -534,16 +537,24 @@ impl eframe::App for InfScalerApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("InfScaler");
-                ui.label(
-                    egui::RichText::new("local photo enhancement")
-                        .weak()
-                        .size(14.0),
-                );
+                ui.label(egui::RichText::new(self.t("tagline")).weak().size(14.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reload models").clicked() && !self.running {
+                    if ui.button(self.t("reload_models")).clicked() && !self.running {
                         self.reload_models();
-                        self.status = format!("{} model(s)", self.models.len());
+                        self.status = self.tr("model_count", &[&self.models.len().to_string()]);
                     }
+                    let mut next = self.lang;
+                    egui::ComboBox::from_id_salt("lang")
+                        .selected_text(self.lang.label())
+                        .show_ui(ui, |ui| {
+                            for lang in Lang::all() {
+                                ui.selectable_value(&mut next, lang, lang.label());
+                            }
+                        });
+                    if next != self.lang {
+                        self.set_lang(next);
+                    }
+                    ui.label(egui::RichText::new(self.t("language")).weak().size(13.0));
                 });
             });
             ui.add_space(4.0);
@@ -593,16 +604,16 @@ impl eframe::App for InfScalerApp {
 impl InfScalerApp {
     fn controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.add_space(4.0);
-        ui.label("Photo");
+        ui.label(self.t("photo"));
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.running, egui::Button::new("Open…"))
+                .add_enabled(!self.running, egui::Button::new(self.t("open")))
                 .clicked()
             {
                 self.pick_input(ctx);
             }
             ui.label(
-                egui::RichText::new("or drop a file on the window")
+                egui::RichText::new(self.t("or_drop_file"))
                     .weak()
                     .size(12.0),
             );
@@ -611,48 +622,56 @@ impl InfScalerApp {
             .button(
                 self.batch_output_dir
                     .as_ref()
-                    .map(|p| format!("Output: {}", p.display()))
-                    .unwrap_or_else(|| "Output folder: automatic".into()),
+                    .map(|p| self.tr("output_folder", &[&p.display().to_string()]))
+                    .unwrap_or_else(|| self.t("output_folder_auto").to_string()),
             )
             .clicked()
             && !self.running
         {
             if let Some(path) = rfd::FileDialog::new()
-                .set_title("Choose output folder")
+                .set_title(self.t("choose_output_folder"))
                 .pick_folder()
             {
                 self.batch_output_dir = Some(path);
             }
         }
         ui.horizontal(|ui| {
-            ui.label("ONNX threads");
+            ui.label(self.t("onnx_threads"));
             ui.add(egui::DragValue::new(&mut self.batch_threads).range(1..=12));
         });
-        if ui.button("Open folder…").clicked() && !self.running {
+        if ui.button(self.t("open_folder")).clicked() && !self.running {
             if let Some(folder) = rfd::FileDialog::new()
-                .set_title("Open image folder")
+                .set_title(self.t("open_image_folder"))
                 .pick_folder()
             {
                 if let Ok(files) = crate::batch::scan_folder(&folder) {
                     self.queued = files;
-                    self.status = format!("Queued {} top-level images", self.queued.len());
+                    self.status = self.tr("queued_top_level", &[&self.queued.len().to_string()]);
                 }
             }
         }
-        ui.label(format!("Queue: {} image(s)", self.queued.len()));
+        ui.label(self.tr("queue_count", &[&self.queued.len().to_string()]));
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("batch-preset")
-                .selected_text(&self.batch_preset)
+                .selected_text(i18n::preset_label(self.lang, &self.batch_preset))
                 .show_ui(ui, |ui| {
                     for p in ["general", "people", "fast"] {
-                        ui.selectable_value(&mut self.batch_preset, p.into(), p);
+                        ui.selectable_value(
+                            &mut self.batch_preset,
+                            p.into(),
+                            i18n::preset_label(self.lang, p),
+                        );
                     }
                 });
             egui::ComboBox::from_id_salt("batch-jobs")
-                .selected_text(format!("{} job(s)", self.batch_jobs))
+                .selected_text(i18n::jobs_label(self.lang, self.batch_jobs))
                 .show_ui(ui, |ui| {
                     for n in 1..=3 {
-                        ui.selectable_value(&mut self.batch_jobs, n, n.to_string());
+                        ui.selectable_value(
+                            &mut self.batch_jobs,
+                            n,
+                            i18n::jobs_label(self.lang, n),
+                        );
                     }
                 });
         });
@@ -664,11 +683,11 @@ impl InfScalerApp {
                         ui.label(path.file_name().unwrap_or_default().to_string_lossy());
                     }
                     if self.queued.len() > 80 {
-                        ui.label(format!("… and {} more", self.queued.len() - 80));
+                        ui.label(self.tr("and_more", &[&(self.queued.len() - 80).to_string()]));
                     }
                 });
             if ui
-                .add_enabled(!self.running, egui::Button::new("Process queued folder"))
+                .add_enabled(!self.running, egui::Button::new(self.t("process_queued")))
                 .clicked()
             {
                 self.start_batch();
@@ -686,32 +705,33 @@ impl InfScalerApp {
         }
 
         ui.add_space(8.0);
-        ui.label("Model");
+        ui.label(self.t("model"));
         let onnx = self.selected().is_some_and(|m| m.is_onnx());
         let selected_name = if self.model_idx == self.models.len() {
-            "Auto (choose per image)".to_string()
+            self.t("auto_choose").to_string()
         } else {
             self.selected()
-                .map(|m| m.display_name())
-                .unwrap_or_else(|| "none".into())
+                .map(|m| m.display_name(self.lang))
+                .unwrap_or_else(|| self.t("none").to_string())
         };
         egui::ComboBox::from_id_salt("model")
             .selected_text(selected_name)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.model_idx,
-                    self.models.len(),
-                    "Auto (choose per image)",
-                );
+                let auto_choose = self.t("auto_choose");
+                ui.selectable_value(&mut self.model_idx, self.models.len(), auto_choose);
                 for (idx, model) in self.models.iter().enumerate() {
-                    let label = model.display_name();
+                    let label = model.display_name(self.lang);
                     let tip = format!(
                         "{} · {} · {}×{}",
                         model.name,
                         model.kind().label(),
                         model.scale,
-                        if model.is_broken() { " · BROKEN" } else { "" }
+                        if model.is_broken() {
+                            self.t("broken_suffix")
+                        } else {
+                            ""
+                        }
                     );
                     ui.add_enabled_ui(!model.is_broken(), |ui| {
                         ui.selectable_value(&mut self.model_idx, idx, label)
@@ -719,13 +739,13 @@ impl InfScalerApp {
                     });
                 }
                 if self.models.is_empty() {
-                    ui.label("No .param + .bin or .onnx models in models/");
+                    ui.label(self.t("no_models_in_folder"));
                 }
             });
         if let Some(model) = self.selected() {
             if let Some(reason) = &model.broken_reason {
                 ui.label(
-                    egui::RichText::new(format!("BROKEN: {reason}"))
+                    egui::RichText::new(self.tr("broken_reason", &[reason]))
                         .color(egui::Color32::from_rgb(220, 90, 70)),
                 );
             }
@@ -747,27 +767,26 @@ impl InfScalerApp {
             }
         }
         if self.model_idx == self.models.len() {
-            ui.label(
-                egui::RichText::new("People → RealWebPhoto DAT · no faces → Nomos2 OTF")
-                    .weak()
-                    .size(12.0),
-            );
+            ui.label(egui::RichText::new(self.t("auto_hint")).weak().size(12.0));
         }
 
         ui.add_space(8.0);
-        ui.label("Output size");
+        ui.label(self.t("output_size"));
         ui.add_enabled_ui(!self.running, |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .selectable_label(self.keep_size, "Original (sharpen)")
-                    .on_hover_text("Recommended: enhance, then scale back to the original pixel size")
+                    .selectable_label(self.keep_size, self.t("original_sharpen"))
+                    .on_hover_text(self.t("original_sharpen_tip"))
                     .clicked()
                 {
                     self.keep_size = true;
                 }
                 for value in [2, 3, 4] {
                     if ui
-                        .selectable_label(!self.keep_size && self.scale == value, format!("{value}×"))
+                        .selectable_label(
+                            !self.keep_size && self.scale == value,
+                            format!("{value}×"),
+                        )
                         .clicked()
                     {
                         self.keep_size = false;
@@ -778,101 +797,96 @@ impl InfScalerApp {
         });
         let model_scale = self.selected().map(|m| m.scale).unwrap_or(4);
         let hint = if self.keep_size {
-            format!("Runs the {model_scale}× model, then Lanczos3 back to the original pixels.")
+            self.tr("hint_keep_size", &[&model_scale.to_string()])
         } else if self.scale == model_scale {
-            format!("Writes the {model_scale}× model output.")
+            self.tr("hint_native", &[&model_scale.to_string()])
         } else {
-            format!(
-                "Runs the {model_scale}× model, then Lanczos3 to {0}× the original.",
-                self.scale
+            self.tr(
+                "hint_rescale",
+                &[&model_scale.to_string(), &self.scale.to_string()],
             )
         };
         ui.label(egui::RichText::new(hint).weak().size(12.0));
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label("Tile");
+            ui.label(self.t("tile"));
             ui.add_enabled(
                 !self.running,
                 egui::DragValue::new(&mut self.tile)
                     .range(0..=1024)
                     .speed(16),
             );
-            ui.label(egui::RichText::new("0 = auto").weak());
+            ui.label(egui::RichText::new(self.t("tile_auto")).weak());
         });
         ui.horizontal(|ui| {
-            ui.label("Overlap");
+            ui.label(self.t("overlap"));
             ui.add_enabled(
                 !self.running,
                 egui::DragValue::new(&mut self.overlap)
                     .range(0..=256)
                     .speed(4),
             );
-            ui.label(egui::RichText::new("ONNX seams").weak());
+            ui.label(egui::RichText::new(self.t("onnx_seams")).weak());
         });
-        ui.label(
-            egui::RichText::new(
-                "NCNN uses the Vulkan tile. ONNX blends a Hann ramp on the CPU. DAT, DRCT, and SCUNet use their fixed input size and at least 48 px of overlap.",
-            )
-            .weak()
-            .size(12.0),
-        );
+        ui.label(egui::RichText::new(self.t("tile_hint")).weak().size(12.0));
 
         ui.add_space(8.0);
-        ui.label("GPU");
+        ui.label(self.t("gpu"));
         let gpu_label = self.gpu_label();
         egui::ComboBox::from_id_salt("gpu")
             .selected_text(gpu_label)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.gpu, "auto".into(), "Auto");
+                let auto_gpu = self.t("auto");
+                ui.selectable_value(&mut self.gpu, "auto".into(), auto_gpu);
                 for device in &self.gpus {
                     ui.selectable_value(&mut self.gpu, device.id.clone(), &device.label);
                 }
-                ui.label("CPU runs ONNX models. NCNN binaries reject -g -1.");
+                ui.label(self.t("cpu_hint"));
             });
 
         ui.add_space(6.0);
+        let tta_label = self.t("tta");
+        let denoise_label = self.t("denoise_first");
+        let face_restore_label = self.t("face_restore");
+        let fast_auto_label = self.t("fast_auto");
         ui.add_enabled(
             !self.running && !onnx && (self.model_idx != self.models.len() || self.fast),
-            egui::Checkbox::new(&mut self.tta, "TTA (8 flips, slower)"),
+            egui::Checkbox::new(&mut self.tta, tta_label),
         );
         if onnx {
             ui.label(
-                egui::RichText::new(
-                    "This model runs on the CPU through ONNX Runtime. TTA stays off.",
-                )
-                .weak()
-                .size(12.0),
+                egui::RichText::new(self.t("tta_onnx_hint"))
+                    .weak()
+                    .size(12.0),
             );
         }
         let has_denoise = self.models.iter().any(|m| m.denoise);
         ui.add_enabled(
             !self.running && has_denoise,
-            egui::Checkbox::new(&mut self.denoise, "Denoise first (SCUNet)"),
+            egui::Checkbox::new(&mut self.denoise, denoise_label),
         );
         ui.add_enabled(
             !self.running,
-            egui::Checkbox::new(
-                &mut self.face_restore,
-                "Restore detected faces after enhancement",
-            ),
+            egui::Checkbox::new(&mut self.face_restore, face_restore_label),
         );
         ui.add_enabled_ui(!self.running && self.face_restore, |ui| {
+            let face_strength_label = self.t("face_strength");
             ui.horizontal(|ui| {
-                ui.label("Face strength");
+                ui.label(face_strength_label);
                 ui.add(egui::Slider::new(&mut self.face_strength, 0.0..=1.0));
             });
         });
         if self.model_idx == self.models.len() {
             ui.add_enabled(
                 !self.running,
-                egui::Checkbox::new(&mut self.fast, "Fast Auto (Nomos8kSC on GPU)"),
+                egui::Checkbox::new(&mut self.fast, fast_auto_label),
             );
         }
 
         ui.add_space(8.0);
-        ui.label("Save as");
+        ui.label(self.t("save_as"));
         ui.horizontal(|ui| {
             ui.add_enabled_ui(!self.running, |ui| {
                 ui.add(
@@ -882,28 +896,38 @@ impl InfScalerApp {
                 );
             });
             if ui
-                .add_enabled(!self.running, egui::Button::new("Browse"))
+                .add_enabled(!self.running, egui::Button::new(self.t("browse")))
                 .clicked()
             {
                 self.pick_output();
             }
         });
         if let Some((w, h)) = self.output_size {
-            ui.label(egui::RichText::new(format!("Last result {w} × {h} px")).weak());
+            ui.label(
+                egui::RichText::new(self.tr("last_result", &[&w.to_string(), &h.to_string()]))
+                    .weak(),
+            );
         }
 
         ui.add_space(12.0);
         if self.running {
             if let Some(control) = &self.batch_control {
                 let paused = control.paused.load(Ordering::SeqCst);
-                if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
+                if ui
+                    .button(if paused {
+                        self.t("resume")
+                    } else {
+                        self.t("pause")
+                    })
+                    .clicked()
+                {
                     control.paused.store(!paused, Ordering::SeqCst);
                 }
             }
             if ui
                 .add_sized(
                     [ui.available_width(), 36.0],
-                    egui::Button::new("Cancel").fill(egui::Color32::from_rgb(130, 48, 48)),
+                    egui::Button::new(self.t("cancel")).fill(egui::Color32::from_rgb(130, 48, 48)),
                 )
                 .clicked()
             {
@@ -918,7 +942,8 @@ impl InfScalerApp {
                 if ui
                     .add_sized(
                         [ui.available_width(), 36.0],
-                        egui::Button::new("Enhance").fill(egui::Color32::from_rgb(32, 110, 186)),
+                        egui::Button::new(self.t("enhance"))
+                            .fill(egui::Color32::from_rgb(32, 110, 186)),
                     )
                     .clicked()
                 {
@@ -946,7 +971,7 @@ impl InfScalerApp {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Drop a photo of a person or animal here",
+                self.t("drop_here"),
                 egui::FontId::proportional(18.0),
                 egui::Color32::from_rgb(170, 170, 176),
             );
@@ -1043,26 +1068,29 @@ impl InfScalerApp {
                 .image(before_id, fitted, uv, egui::Color32::WHITE);
             let x = split_x(self.split);
             painter.line_segment(
-                [egui::pos2(x, visible.top()), egui::pos2(x, visible.bottom())],
+                [
+                    egui::pos2(x, visible.top()),
+                    egui::pos2(x, visible.bottom()),
+                ],
                 egui::Stroke::new(2.0, egui::Color32::WHITE),
             );
             painter.circle_filled(egui::pos2(x, visible.center().y), 7.0, egui::Color32::WHITE);
             paint_tag(
                 &painter,
                 egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
-                "Before",
+                self.t("before"),
             );
-            paint_tag(
+            paint_tag_right(
                 &painter,
-                egui::pos2(fitted.right() - 64.0, fitted.top() + 8.0),
-                "After",
+                egui::pos2(fitted.right() - 8.0, fitted.top() + 8.0),
+                self.t("after"),
             );
         } else {
             painter.image(before_id, fitted, uv, egui::Color32::WHITE);
             paint_tag(
                 &painter,
                 egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
-                "Original",
+                self.t("original"),
             );
         }
 
@@ -1076,18 +1104,36 @@ impl InfScalerApp {
         }
     }
 
+    fn t(&self, key: &str) -> &'static str {
+        i18n::t(self.lang, key)
+    }
+
+    fn tr(&self, key: &str, args: &[&str]) -> String {
+        i18n::tr(self.lang, key, args)
+    }
+
+    fn set_lang(&mut self, lang: Lang) {
+        if self.lang == lang {
+            return;
+        }
+        self.status = i18n::localize_runtime(lang, &self.status);
+        self.error = i18n::localize_runtime(lang, &self.error);
+        self.lang = lang;
+        i18n::save_lang(lang);
+    }
+
     fn gpu_label(&self) -> String {
         if self.gpu == "auto" {
-            return "Auto".into();
+            return self.t("auto").to_string();
         }
         if self.gpu == "cpu" {
-            return "CPU".into();
+            return self.t("cpu").to_string();
         }
         self.gpus
             .iter()
             .find(|g| g.id == self.gpu)
             .map(|g| g.label.clone())
-            .unwrap_or_else(|| format!("GPU {}", self.gpu))
+            .unwrap_or_else(|| self.tr("gpu_n", &[&self.gpu]))
     }
 
     fn current_elapsed(&self) -> Option<Duration> {
@@ -1097,6 +1143,43 @@ impl InfScalerApp {
             self.elapsed
         }
     }
+}
+
+fn install_ui_fonts(ctx: &egui::Context) {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ];
+    let Some((name, bytes)) = CANDIDATES.iter().find_map(|path| {
+        std::fs::read(path)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| {
+                let name = if path.contains("NotoSans") {
+                    "NotoSans"
+                } else {
+                    "DejaVuSans"
+                };
+                (name, bytes)
+            })
+    }) else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        name.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(0, name.to_owned());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        family.push(name.to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 fn apply_style(ctx: &egui::Context) {
@@ -1146,6 +1229,19 @@ fn paint_tag(painter: &egui::Painter, pos: egui::Pos2, text: &str) {
         egui::Color32::WHITE,
     );
     let rect = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(12.0, 6.0));
+    painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(160));
+    painter.galley(pos + egui::vec2(6.0, 3.0), galley, egui::Color32::WHITE);
+}
+
+fn paint_tag_right(painter: &egui::Painter, right_top: egui::Pos2, text: &str) {
+    let galley = painter.layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+    let size = galley.size() + egui::vec2(12.0, 6.0);
+    let pos = egui::pos2(right_top.x - size.x, right_top.y);
+    let rect = egui::Rect::from_min_size(pos, size);
     painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(160));
     painter.galley(pos + egui::vec2(6.0, 3.0), galley, egui::Color32::WHITE);
 }

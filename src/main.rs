@@ -3,6 +3,7 @@ mod cli;
 mod engine;
 mod face;
 mod gui;
+mod i18n;
 mod models;
 mod ort_backend;
 mod paths;
