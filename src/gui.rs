@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::batch::BatchEvent;
 use crate::engine::{self, EngineEvent, GpuChoice, GpuDevice, JobOptions, RunOutcome};
 use crate::i18n::{self, Lang};
 use crate::models::{self, ModelInfo};
 use crate::paths;
 use crate::theme;
+use crate::thumbs::ThumbCache;
 
 pub struct ScreenshotSpec {
     pub output: PathBuf,
@@ -20,6 +22,8 @@ pub struct ScreenshotSpec {
     pub lang: Option<Lang>,
     pub expand: bool,
     pub scroll: bool,
+    pub queue: Option<PathBuf>,
+    pub fake_queue_states: bool,
 }
 
 struct ScreenshotJob {
@@ -63,9 +67,9 @@ fn window_icon() -> egui::IconData {
 fn run_inner(screenshot: Option<ScreenshotSpec>) -> eframe::Result {
     prefer_x11_for_drag_and_drop();
     let size = if screenshot.is_some() {
-        [1400.0, 1120.0]
+        [1520.0, 980.0]
     } else {
-        [1280.0, 840.0]
+        [1360.0, 900.0]
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -88,6 +92,25 @@ enum WorkerMsg {
     Event(EngineEvent),
     Finished(Result<RunOutcome, String>),
     BatchFinished(Result<(), String>),
+    BatchEvent(BatchEvent),
+}
+
+#[derive(Clone)]
+enum QueueStatus {
+    Pending,
+    Processing,
+    Done {
+        output: PathBuf,
+    },
+    Failed {
+        #[allow(dead_code)]
+        error: String,
+    },
+}
+
+struct QueueItem {
+    path: PathBuf,
+    status: QueueStatus,
 }
 
 struct InfScalerApp {
@@ -125,7 +148,21 @@ struct InfScalerApp {
     cancel: Option<Arc<AtomicBool>>,
     pid: Option<Arc<AtomicU32>>,
     hovering_file: bool,
-    queued: Vec<PathBuf>,
+    queue: Vec<QueueItem>,
+    queue_selected: usize,
+    thumbs: ThumbCache,
+    #[allow(dead_code)]
+    card_open: [bool; 4],
+    #[allow(dead_code)]
+    compare_on: bool,
+    #[allow(dead_code)]
+    pan_tool: bool,
+    #[allow(dead_code)]
+    about_open: bool,
+    #[allow(dead_code)]
+    show_log: bool,
+    #[allow(dead_code)]
+    more_open: bool,
     batch_jobs: usize,
     batch_threads: usize,
     batch_preset: String,
@@ -185,7 +222,15 @@ impl InfScalerApp {
             cancel: None,
             pid: None,
             hovering_file: false,
-            queued: Vec::new(),
+            queue: Vec::new(),
+            queue_selected: 0,
+            thumbs: ThumbCache::new(),
+            card_open: [true; 4],
+            compare_on: true,
+            pan_tool: false,
+            about_open: false,
+            show_log: false,
+            more_open: false,
             batch_jobs: 1,
             batch_threads: 4,
             batch_preset: "general".into(),
@@ -223,10 +268,10 @@ impl InfScalerApp {
                 self.model_idx = idx;
             }
         }
-        if let Some(path) = spec.input {
+        if let Some(path) = spec.input.clone() {
             self.load_input(ctx, path);
         }
-        if let Some(path) = spec.after {
+        if let Some(path) = spec.after.clone() {
             match engine::make_preview(&path, 1600) {
                 Ok((rgba, w, h)) => {
                     self.after = Some(load_texture(ctx, "after", &rgba, w, h));
@@ -237,6 +282,40 @@ impl InfScalerApp {
                     self.progress = 100.0;
                 }
                 Err(err) => self.error = format!("{err:#}"),
+            }
+        }
+        if let Some(dir) = &spec.queue {
+            if let Ok(files) = crate::batch::scan_folder(dir) {
+                self.replace_queue(files);
+                if spec.fake_queue_states {
+                    let after = spec.after.clone();
+                    for (i, item) in self.queue.iter_mut().enumerate() {
+                        item.status = match i {
+                            0 => QueueStatus::Done {
+                                output: after.clone().unwrap_or_else(|| item.path.clone()),
+                            },
+                            1 => QueueStatus::Processing,
+                            2 => QueueStatus::Failed {
+                                error: "screenshot".into(),
+                            },
+                            _ => QueueStatus::Pending,
+                        };
+                    }
+                }
+                if let Some(first) = self.queue.first().map(|item| item.path.clone()) {
+                    if spec.input.is_none() {
+                        self.load_input(ctx, first);
+                    }
+                    if let Some(QueueStatus::Done { output }) =
+                        self.queue.first().map(|item| item.status.clone())
+                    {
+                        if self.after.is_none() {
+                            if let Ok((rgba, w, h)) = engine::make_preview(&output, 1600) {
+                                self.after = Some(load_texture(ctx, "after", &rgba, w, h));
+                            }
+                        }
+                    }
+                }
             }
         }
         self.scroll_controls = spec.scroll;
@@ -333,18 +412,32 @@ impl InfScalerApp {
                 Err(TryRecvError::Disconnected) => {}
             }
         }
-        let Some(rx) = &self.rx else { return };
+        if self.rx.is_none() {
+            return;
+        }
         loop {
-            match rx.try_recv() {
-                Ok(WorkerMsg::Event(EngineEvent::Percent(p))) => {
+            let message = match self.rx.as_ref().unwrap().try_recv() {
+                Ok(msg) => msg,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if self.running {
+                        self.running = false;
+                        self.status = self.t("failed").to_string();
+                        self.error = self.t("thread_exited").to_string();
+                    }
+                    break;
+                }
+            };
+            match message {
+                WorkerMsg::Event(EngineEvent::Percent(p)) => {
                     self.progress = p;
                     self.status = self.tr("upscaling_pct", &[&format!("{p:.1}")]);
                 }
-                Ok(WorkerMsg::Event(EngineEvent::Stage(text))) => {
+                WorkerMsg::Event(EngineEvent::Stage(text)) => {
                     self.status = i18n::plain_stage(self.lang, &text);
                     push_log(&mut self.log, &text);
                 }
-                Ok(WorkerMsg::Event(EngineEvent::Log(line))) => {
+                WorkerMsg::Event(EngineEvent::Log(line)) => {
                     if let Some((done, total)) = line
                         .split_whitespace()
                         .next()
@@ -359,11 +452,12 @@ impl InfScalerApp {
                     }
                     push_log(&mut self.log, &line);
                 }
-                Ok(WorkerMsg::Finished(Ok(outcome))) => {
+                WorkerMsg::Finished(Ok(outcome)) => {
                     self.running = false;
                     self.elapsed = Some(outcome.elapsed);
                     self.progress = 100.0;
                     self.output_size = Some(outcome.output_size);
+                    self.mark_queue_done(&outcome.output);
                     self.error.clear();
                     self.status = self.tr(
                         "saved",
@@ -382,7 +476,8 @@ impl InfScalerApp {
                         }
                     }
                 }
-                Ok(WorkerMsg::Finished(Err(message))) => {
+                WorkerMsg::Finished(Err(message)) => {
+                    self.mark_queue_failed(&message);
                     self.running = false;
                     if let Some(start) = self.started {
                         self.elapsed = Some(start.elapsed());
@@ -390,7 +485,7 @@ impl InfScalerApp {
                     self.status = self.t("failed").to_string();
                     self.error = i18n::localize_runtime(self.lang, &message);
                 }
-                Ok(WorkerMsg::BatchFinished(result)) => {
+                WorkerMsg::BatchFinished(result) => {
                     self.running = false;
                     self.batch_control = None;
                     self.status = match result {
@@ -398,15 +493,7 @@ impl InfScalerApp {
                         Err(e) => self.tr("batch_stopped", &[&e]),
                     };
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if self.running {
-                        self.running = false;
-                        self.status = self.t("failed").to_string();
-                        self.error = self.t("thread_exited").to_string();
-                    }
-                    break;
-                }
+                WorkerMsg::BatchEvent(event) => self.apply_batch_event(event),
             }
         }
         if self.running {
@@ -547,6 +634,9 @@ impl InfScalerApp {
         self.after = None;
         self.log.clear();
         self.status = self.t("starting").to_string();
+        if let Some(item) = self.queue.get_mut(self.queue_selected) {
+            item.status = QueueStatus::Processing;
+        }
 
         thread::spawn(move || {
             let tx_events = tx.clone();
@@ -584,11 +674,11 @@ impl InfScalerApp {
             self.error = self.t("project_folder_missing").to_string();
             return;
         };
-        let Some(first) = self.queued.first().cloned() else {
+        let Some(first) = self.queue.first().map(|item| item.path.clone()) else {
             return;
         };
         let input_dir = first.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let files = self.queued.clone();
+        let files = self.queue_paths();
         let control = Arc::new(crate::batch::BatchControl::default());
         self.batch_control = Some(control.clone());
         let (tx, rx) = mpsc::channel();
@@ -616,13 +706,99 @@ impl InfScalerApp {
         };
         thread::spawn(move || {
             let tx_report = tx.clone();
-            let result = crate::batch::run(&root, &opts, control, move |line| {
-                let _ = tx_report.send(WorkerMsg::Event(EngineEvent::Log(line)));
+            let result = crate::batch::run(&root, &opts, control, move |ev| match ev {
+                BatchEvent::Line(line) => {
+                    let _ = tx_report.send(WorkerMsg::Event(EngineEvent::Log(line)));
+                }
+                other => {
+                    let _ = tx_report.send(WorkerMsg::BatchEvent(other));
+                }
             });
             let _ = tx.send(WorkerMsg::BatchFinished(
                 result.map_err(|e| format!("{e:#}")),
             ));
         });
+    }
+
+    fn queue_paths(&self) -> Vec<PathBuf> {
+        self.queue.iter().map(|item| item.path.clone()).collect()
+    }
+
+    fn replace_queue(&mut self, files: Vec<PathBuf>) {
+        self.queue = files
+            .into_iter()
+            .map(|path| QueueItem {
+                path,
+                status: QueueStatus::Pending,
+            })
+            .collect();
+        self.queue_selected = 0;
+        let keep = self.queue_paths();
+        self.thumbs.retain(&keep);
+    }
+
+    fn extend_queue(&mut self, files: Vec<PathBuf>) {
+        for path in files {
+            self.push_queue_path(path);
+        }
+        let keep = self.queue_paths();
+        self.thumbs.retain(&keep);
+    }
+
+    fn push_queue_path(&mut self, path: PathBuf) {
+        if let Some(idx) = self.queue.iter().position(|item| item.path == path) {
+            self.queue_selected = idx;
+            return;
+        }
+        self.queue.push(QueueItem {
+            path,
+            status: QueueStatus::Pending,
+        });
+        self.queue_selected = self.queue.len().saturating_sub(1);
+    }
+
+    fn apply_batch_event(&mut self, event: BatchEvent) {
+        match event {
+            BatchEvent::Line(_) => {}
+            BatchEvent::FileStarted { path, .. } => {
+                if let Some(item) = self.queue.iter_mut().find(|item| item.path == path) {
+                    item.status = QueueStatus::Processing;
+                }
+            }
+            BatchEvent::FileFinished { path, output, .. }
+            | BatchEvent::FileSkipped { path, output, .. } => {
+                if let Some(item) = self.queue.iter_mut().find(|item| item.path == path) {
+                    item.status = QueueStatus::Done { output };
+                }
+            }
+            BatchEvent::FileFailed { path, error, .. } => {
+                if let Some(item) = self.queue.iter_mut().find(|item| item.path == path) {
+                    item.status = QueueStatus::Failed { error };
+                }
+            }
+        }
+    }
+
+    fn mark_queue_done(&mut self, output: &Path) {
+        let input = PathBuf::from(self.input_path.trim());
+        let idx = self
+            .queue
+            .iter()
+            .position(|item| item.path == input)
+            .unwrap_or(self.queue_selected);
+        if let Some(item) = self.queue.get_mut(idx) {
+            item.status = QueueStatus::Done {
+                output: output.to_path_buf(),
+            };
+        }
+    }
+
+    fn mark_queue_failed(&mut self, message: &str) {
+        if let Some(item) = self.queue.get_mut(self.queue_selected) {
+            item.status = QueueStatus::Failed {
+                error: message.to_string(),
+            };
+        }
     }
 }
 
@@ -630,6 +806,12 @@ impl eframe::App for InfScalerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        self.thumbs.poll(&ctx);
+        let queued_paths = self.queue_paths();
+        self.thumbs.retain(&queued_paths);
+        for path in &queued_paths {
+            self.thumbs.request(path);
+        }
         self.hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -652,10 +834,10 @@ impl eframe::App for InfScalerApp {
             if !self.running {
                 if path.is_dir() {
                     if let Ok(files) = crate::batch::scan_folder(&path) {
-                        self.queued.extend(files);
+                        self.extend_queue(files);
                     }
                 } else {
-                    self.queued.push(path.clone());
+                    self.push_queue_path(path.clone());
                     self.load_input(&ctx, path);
                 }
             }
@@ -834,12 +1016,13 @@ impl InfScalerApp {
                 .pick_folder()
             {
                 if let Ok(files) = crate::batch::scan_folder(&folder) {
-                    self.queued = files;
-                    self.status = self.tr("queued_top_level", &[&self.queued.len().to_string()]);
+                    let n = files.len();
+                    self.replace_queue(files);
+                    self.status = self.tr("queued_top_level", &[&n.to_string()]);
                 }
             }
         }
-        ui.label(self.tr("queue_count", &[&self.queued.len().to_string()]));
+        ui.label(self.tr("queue_count", &[&self.queue.len().to_string()]));
         egui::ComboBox::from_id_salt("batch-preset")
             .selected_text(i18n::preset_label(self.lang, &self.batch_preset))
             .width((ui.available_width() - 8.0).max(120.0))
@@ -869,15 +1052,15 @@ impl InfScalerApp {
                 }
             });
         });
-        if !self.queued.is_empty() {
+        if !self.queue.is_empty() {
             egui::ScrollArea::vertical()
                 .max_height(110.0)
                 .show(ui, |ui| {
-                    for path in self.queued.iter().take(80) {
-                        ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                    for item in self.queue.iter().take(80) {
+                        ui.label(item.path.file_name().unwrap_or_default().to_string_lossy());
                     }
-                    if self.queued.len() > 80 {
-                        ui.label(self.tr("and_more", &[&(self.queued.len() - 80).to_string()]));
+                    if self.queue.len() > 80 {
+                        ui.label(self.tr("and_more", &[&(self.queue.len() - 80).to_string()]));
                     }
                 });
             if ui

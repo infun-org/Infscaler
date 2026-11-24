@@ -474,6 +474,116 @@ pub const ENTRIES: &[(&str, &str, &str)] = &[
         "Fewer threads keep the computer smooth for other work; more threads finish a little faster.",
         "Ít luồng thì máy vẫn mượt để làm việc khác; nhiều luồng thì xong nhanh hơn một chút.",
     ),
+    (
+        "input_photo",
+        "Input photo",
+        "Ảnh đầu vào",
+    ),
+    (
+        "open_photo_btn",
+        "Open photo…",
+        "Mở ảnh...",
+    ),
+    (
+        "drop_on_window",
+        "or drop a file on the window",
+        "hoặc thả file vào cửa sổ",
+    ),
+    (
+        "preview",
+        "Preview",
+        "Xem trước",
+    ),
+    (
+        "image_queue",
+        "Image queue",
+        "Hàng đợi ảnh",
+    ),
+    (
+        "queue_count_short",
+        "{} images",
+        "{} ảnh",
+    ),
+    (
+        "queue_empty",
+        "No photos in the queue yet. Open a photo or drop files on the window.",
+        "Chưa có ảnh trong hàng đợi. Mở ảnh hoặc thả file vào cửa sổ.",
+    ),
+    (
+        "result",
+        "Result",
+        "Kết quả",
+    ),
+    (
+        "original_short",
+        "Original",
+        "Gốc",
+    ),
+    (
+        "fit_to_window",
+        "Fit to window",
+        "Vừa cửa sổ",
+    ),
+    (
+        "zoom",
+        "Zoom",
+        "Thu phóng",
+    ),
+    (
+        "zoom_fit",
+        "Fit",
+        "Vừa",
+    ),
+    (
+        "pan_tool",
+        "Pan",
+        "Di chuyển",
+    ),
+    (
+        "compare_tool",
+        "Compare",
+        "So sánh",
+    ),
+    (
+        "more_menu",
+        "More",
+        "Thêm",
+    ),
+    (
+        "open_output_folder",
+        "Open output folder",
+        "Mở thư mục lưu",
+    ),
+    (
+        "about",
+        "About",
+        "Giới thiệu",
+    ),
+    (
+        "about_blurb",
+        "Local photo enhancement on this computer.",
+        "Làm nét ảnh ngay trên máy.",
+    ),
+    (
+        "show_log",
+        "Show log",
+        "Hiện nhật ký",
+    ),
+    (
+        "hide_log",
+        "Hide log",
+        "Ẩn nhật ký",
+    ),
+    (
+        "processing",
+        "Processing",
+        "Đang xử lý",
+    ),
+    (
+        "queue_one_image",
+        "1 image",
+        "1 ảnh",
+    ),
 ];
 
 /// Fill `{}` placeholders in a template, left to right.

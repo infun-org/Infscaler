@@ -410,6 +410,93 @@ pub fn pill(painter: &egui::Painter, pos: egui::Pos2, text: &str, right_align: b
     painter.galley(origin + Vec2::new(8.0, 4.0), galley, WHITE);
 }
 
+#[allow(dead_code)]
+pub const SIZE_SECTION: f32 = 16.0;
+
+#[allow(dead_code)]
+pub fn section_text(text: impl Into<String>) -> RichText {
+    RichText::new(text)
+        .font(FontId::new(SIZE_SECTION, family_medium()))
+        .color(TEXT)
+}
+
+#[allow(dead_code)]
+pub fn slim_status_panel() -> Frame {
+    Frame::new()
+        .fill(MICA)
+        .inner_margin(Margin::symmetric(16, 6))
+        .stroke(Stroke::new(1.0, BORDER))
+}
+
+/// Clickable card header + optional body, Fluent-style.
+#[allow(dead_code)]
+pub fn collapsing_card<R>(
+    ui: &mut egui::Ui,
+    _id: impl std::hash::Hash,
+    icon: crate::icons::Icon,
+    title: &str,
+    open: &mut bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    use crate::icons;
+    let mut result = None;
+    card_frame().show(ui, |ui| {
+        let header =
+            ui.allocate_response(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+        let r = header.rect;
+        icons::paint(
+            ui,
+            icon,
+            egui::pos2(r.left() + 8.0, r.center().y),
+            16.0,
+            TEXT,
+        );
+        let galley = ui.painter().layout_no_wrap(
+            title.to_string(),
+            FontId::new(SIZE_SECTION, family_medium()),
+            TEXT,
+        );
+        ui.painter().galley(
+            egui::pos2(r.left() + 28.0, r.center().y - galley.size().y * 0.5),
+            galley,
+            TEXT,
+        );
+        icons::paint(
+            ui,
+            if *open {
+                icons::Icon::ChevronDown
+            } else {
+                icons::Icon::ChevronRight
+            },
+            egui::pos2(r.right() - 12.0, r.center().y),
+            14.0,
+            TEXT_SECONDARY,
+        );
+        if header.clicked() {
+            *open = !*open;
+        }
+        if *open {
+            ui.add_space(8.0);
+            result = Some(add_contents(ui));
+        }
+    });
+    result
+}
+
+#[allow(dead_code)]
+pub fn stepper(
+    ui: &mut egui::Ui,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> egui::Response {
+    ui.add(
+        egui::DragValue::new(value)
+            .range(range)
+            .speed(1)
+            .update_while_editing(false),
+    )
+}
+
 pub fn save_color_image(image: &egui::ColorImage, path: &std::path::Path) -> Result<(), String> {
     let [w, h] = image.size;
     let mut rgba = Vec::with_capacity(w * h * 4);

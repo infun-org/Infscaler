@@ -117,6 +117,14 @@ pub struct Cli {
     /// Hidden: scroll the settings pane to the bottom in a --screenshot run.
     #[arg(long, hide = true, default_value_t = false)]
     pub screenshot_scroll: bool,
+
+    /// Hidden: load a folder into the queue for a --screenshot run.
+    #[arg(long, hide = true)]
+    pub screenshot_queue: Option<std::path::PathBuf>,
+
+    /// Hidden: assign fake done/processing/failed queue states for screenshots.
+    #[arg(long, hide = true, default_value_t = false)]
+    pub screenshot_queue_states: bool,
 }
 
 impl Cli {
@@ -137,6 +145,8 @@ impl Cli {
             lang,
             expand: self.screenshot_expand,
             scroll: self.screenshot_scroll,
+            queue: self.screenshot_queue.clone(),
+            fake_queue_states: self.screenshot_queue_states,
         })
     }
 }
@@ -174,7 +184,13 @@ pub fn run(cli: &Cli) -> Result<()> {
                 preset: cli.preset.clone(),
             },
             control,
-            |line| eprintln!("{line}"),
+            |ev| {
+                if let crate::batch::BatchEvent::Line(line) = ev {
+                    eprintln!("{line}");
+                } else if let crate::batch::BatchEvent::FileFailed { path, error, .. } = ev {
+                    eprintln!("{}: {error}", path.display());
+                }
+            },
         )?;
         return Ok(());
     }

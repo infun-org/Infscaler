@@ -33,6 +33,35 @@ pub struct BatchControl {
     pub cancelled: AtomicBool,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum BatchEvent {
+    Line(String),
+    FileStarted {
+        index: usize,
+        total: usize,
+        path: PathBuf,
+    },
+    FileFinished {
+        index: usize,
+        total: usize,
+        path: PathBuf,
+        output: PathBuf,
+    },
+    FileSkipped {
+        index: usize,
+        total: usize,
+        path: PathBuf,
+        output: PathBuf,
+    },
+    FileFailed {
+        index: usize,
+        total: usize,
+        path: PathBuf,
+        error: String,
+    },
+}
+
 pub fn scan_folder(folder: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(folder).with_context(|| format!("scan {}", folder.display()))? {
@@ -67,7 +96,7 @@ pub fn run(
     root: &Path,
     options: &BatchOptions,
     control: Arc<BatchControl>,
-    report: impl FnMut(String) + Send + 'static,
+    report: impl FnMut(BatchEvent) + Send + 'static,
 ) -> Result<()> {
     let files = options
         .input_files
@@ -82,7 +111,9 @@ pub fn run(
     let jobs = requested_jobs.min(options.threads.max(1));
     let threads = options.threads.max(1) / jobs;
     crate::ort_backend::set_thread_count(threads.max(1));
-    let reporter = Arc::new(Mutex::new(Box::new(report) as Box<dyn FnMut(String) + Send>));
+    let reporter = Arc::new(Mutex::new(
+        Box::new(report) as Box<dyn FnMut(BatchEvent) + Send>
+    ));
     report_line(
         &reporter,
         format!(
@@ -146,6 +177,15 @@ pub fn run(
                             output.display()
                         ),
                     );
+                    report_event(
+                        &reporter,
+                        BatchEvent::FileSkipped {
+                            index,
+                            total,
+                            path: input.clone(),
+                            output: output.clone(),
+                        },
+                    );
                     done.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
@@ -175,7 +215,11 @@ pub fn run(
                     input: input.clone(),
                     output: temp.clone(),
                     model: "auto".into(),
-                    output_scale: match mode { OutputMode::Upscale2 => 2, OutputMode::Upscale3 => 3, _ => 4 },
+                    output_scale: match mode {
+                        OutputMode::Upscale2 => 2,
+                        OutputMode::Upscale3 => 3,
+                        _ => 4,
+                    },
                     tile: 0,
                     tta: false,
                     keep_size: mode == OutputMode::Sharpen,
@@ -191,6 +235,14 @@ pub fn run(
                 let cancel = AtomicBool::new(false);
                 let pid = AtomicU32::new(0);
                 let image_started = Instant::now();
+                report_event(
+                    &reporter,
+                    BatchEvent::FileStarted {
+                        index,
+                        total,
+                        path: input.clone(),
+                    },
+                );
                 let mut result = engine::run_job(&root, &job, &cancel, &pid, |_| {});
                 if result
                     .as_ref()
@@ -235,9 +287,29 @@ pub fn run(
                         Err(std::io::Error::other(format!("{err:#}")))
                     }
                 };
-                if let Err(err) = message {
-                    if let Ok(mut e) = errors.lock() {
-                        e.push(format!("{}: {err}", input.display()));
+                match &message {
+                    Ok(_) => report_event(
+                        &reporter,
+                        BatchEvent::FileFinished {
+                            index,
+                            total,
+                            path: input.clone(),
+                            output: output.clone(),
+                        },
+                    ),
+                    Err(err) => {
+                        if let Ok(mut e) = errors.lock() {
+                            e.push(format!("{}: {err}", input.display()));
+                        }
+                        report_event(
+                            &reporter,
+                            BatchEvent::FileFailed {
+                                index,
+                                total,
+                                path: input.clone(),
+                                error: err.to_string(),
+                            },
+                        );
                     }
                 }
                 let completed = done.fetch_add(1, Ordering::SeqCst) + 1;
@@ -286,10 +358,14 @@ pub fn run(
     Ok(())
 }
 
-fn report_line(reporter: &Arc<Mutex<Box<dyn FnMut(String) + Send>>>, message: String) {
+fn report_event(reporter: &Arc<Mutex<Box<dyn FnMut(BatchEvent) + Send>>>, event: BatchEvent) {
     if let Ok(mut report) = reporter.lock() {
-        report(message);
+        report(event);
     }
+}
+
+fn report_line(reporter: &Arc<Mutex<Box<dyn FnMut(BatchEvent) + Send>>>, message: String) {
+    report_event(reporter, BatchEvent::Line(message));
 }
 
 fn temp_output_path(output: &Path, worker: usize) -> PathBuf {
