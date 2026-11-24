@@ -12,6 +12,13 @@ use crate::models::{self, ModelInfo};
 use crate::paths;
 
 pub fn run() -> eframe::Result {
+    // winit's Wayland backend does not deliver file drag-and-drop events, so
+    // prefer X11 (XWayland) when it is available. Set INFSCALER_WAYLAND=1 to
+    // keep native Wayland.
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("INFSCALER_WAYLAND").is_none() {
+        // SAFETY: called at startup before any other threads are spawned.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("InfScaler")
