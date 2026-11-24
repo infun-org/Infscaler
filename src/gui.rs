@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,8 +11,34 @@ use crate::engine::{self, EngineEvent, GpuChoice, GpuDevice, JobOptions, RunOutc
 use crate::i18n::{self, Lang};
 use crate::models::{self, ModelInfo};
 use crate::paths;
+use crate::theme;
+
+pub struct ScreenshotSpec {
+    pub output: PathBuf,
+    pub input: Option<PathBuf>,
+    pub after: Option<PathBuf>,
+    pub lang: Option<Lang>,
+    pub expand: bool,
+    pub scroll: bool,
+}
+
+struct ScreenshotJob {
+    output: PathBuf,
+    frames: u32,
+    requested: bool,
+    done: Arc<AtomicBool>,
+    error: Arc<Mutex<Option<String>>>,
+}
 
 pub fn run() -> eframe::Result {
+    run_inner(None)
+}
+
+pub fn run_screenshot(spec: ScreenshotSpec) -> eframe::Result {
+    run_inner(Some(spec))
+}
+
+fn prefer_x11_for_drag_and_drop() {
     // winit's Wayland backend does not deliver file drag-and-drop events, so
     // prefer X11 (XWayland) when it is available. Set INFSCALER_WAYLAND=1 to
     // keep native Wayland.
@@ -20,10 +46,19 @@ pub fn run() -> eframe::Result {
         // SAFETY: called at startup before any other threads are spawned.
         unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
     }
+}
+
+fn run_inner(screenshot: Option<ScreenshotSpec>) -> eframe::Result {
+    prefer_x11_for_drag_and_drop();
+    let size = if screenshot.is_some() {
+        [1400.0, 1120.0]
+    } else {
+        [1280.0, 840.0]
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("InfScaler")
-            .with_inner_size([1240.0, 800.0])
+            .with_inner_size(size)
             .with_min_inner_size([880.0, 560.0])
             .with_drag_and_drop(true),
         ..Default::default()
@@ -31,7 +66,7 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         "InfScaler",
         options,
-        Box::new(|cc| Ok(Box::new(InfScalerApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(InfScalerApp::new(cc, screenshot)))),
     )
 }
 
@@ -83,15 +118,23 @@ struct InfScalerApp {
     batch_output_dir: Option<PathBuf>,
     batch_control: Option<Arc<crate::batch::BatchControl>>,
     lang: Lang,
+    persist_lang: bool,
+    expand_tech: bool,
+    screenshot: Option<ScreenshotJob>,
+    scroll_controls: bool,
     zoom: f32,
     pan: egui::Vec2,
 }
 
 impl InfScalerApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply_style(&cc.egui_ctx);
-        install_ui_fonts(&cc.egui_ctx);
-        let lang = i18n::load_lang();
+    fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<ScreenshotSpec>) -> Self {
+        theme::apply(&cc.egui_ctx);
+        let persist_lang = screenshot.is_none();
+        let expand_tech = screenshot.as_ref().is_some_and(|s| s.expand);
+        let lang = screenshot
+            .as_ref()
+            .and_then(|s| s.lang)
+            .unwrap_or_else(i18n::load_lang);
         let root = paths::find_root();
         let mut app = Self {
             root,
@@ -135,6 +178,10 @@ impl InfScalerApp {
             batch_output_dir: None,
             batch_control: None,
             lang,
+            persist_lang,
+            expand_tech,
+            screenshot: None,
+            scroll_controls: false,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
         };
@@ -145,7 +192,76 @@ impl InfScalerApp {
         } else if app.models.is_empty() {
             app.status = i18n::t(lang, "no_models_yet").to_string();
         }
+        if let Some(spec) = screenshot {
+            app.prepare_screenshot(&cc.egui_ctx, spec);
+        }
         app
+    }
+
+    fn prepare_screenshot(&mut self, ctx: &egui::Context, spec: ScreenshotSpec) {
+        if spec.expand {
+            if let Some(idx) = self
+                .models
+                .iter()
+                .position(|m| m.name == "scunet_color_real_psnr")
+                .or_else(|| self.models.iter().position(|m| !m.is_broken()))
+            {
+                self.model_idx = idx;
+            }
+        }
+        if let Some(path) = spec.input {
+            self.load_input(ctx, path);
+        }
+        if let Some(path) = spec.after {
+            match engine::make_preview(&path, 1600) {
+                Ok((rgba, w, h)) => {
+                    self.after = Some(load_texture(ctx, "after", &rgba, w, h));
+                    if let Ok(size) = image::image_dimensions(&path) {
+                        self.output_size = Some(size);
+                    }
+                    self.output_path = path.display().to_string();
+                    self.progress = 100.0;
+                }
+                Err(err) => self.error = format!("{err:#}"),
+            }
+        }
+        self.scroll_controls = spec.scroll;
+        self.screenshot = Some(ScreenshotJob {
+            output: spec.output,
+            frames: 0,
+            requested: false,
+            done: Arc::new(AtomicBool::new(false)),
+            error: Arc::new(Mutex::new(None)),
+        });
+    }
+
+    fn tick_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.screenshot.as_mut() else {
+            return;
+        };
+        job.frames += 1;
+        ctx.request_repaint();
+        if job.done.load(Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if job.frames >= 10 && !job.requested {
+            job.requested = true;
+            let output = job.output.clone();
+            let done = job.done.clone();
+            let error = job.error.clone();
+            ctx.request_screenshot(move |image| {
+                if let Err(err) = theme::save_color_image(&image, &output) {
+                    *error.lock().unwrap() = Some(err);
+                }
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+        if job.frames > 180 {
+            *job.error.lock().unwrap() = Some("screenshot timed out".into());
+            job.done.store(true, Ordering::SeqCst);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     fn reload_models(&mut self) {
@@ -534,100 +650,154 @@ impl eframe::App for InfScalerApp {
             self.pick_input(&ctx);
         }
 
-        egui::Panel::top("header").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.heading("InfScaler");
-                ui.label(egui::RichText::new(self.t("tagline")).weak().size(14.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(self.t("reload_models")).clicked() && !self.running {
-                        self.reload_models();
-                        self.status = self.tr("model_count", &[&self.models.len().to_string()]);
-                    }
-                    let mut next = self.lang;
-                    egui::ComboBox::from_id_salt("lang")
-                        .selected_text(self.lang.label())
-                        .show_ui(ui, |ui| {
-                            for lang in Lang::all() {
-                                ui.selectable_value(&mut next, lang, lang.label());
-                            }
+        egui::Panel::top("header")
+            .frame(theme::header_panel())
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(theme::title_text("InfScaler")));
+                    ui.add_space(12.0);
+                    ui.label(theme::caption_text(self.t("tagline")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(
+                                !self.running,
+                                theme::standard_button(self.t("reload_models")),
+                            )
+                            .clicked()
+                        {
+                            self.reload_models();
+                            self.status = self.tr("model_count", &[&self.models.len().to_string()]);
+                        }
+                        ui.add_space(8.0);
+                        theme::segmented_frame().show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.horizontal(|ui| {
+                                let current = self.lang;
+                                for lang in Lang::all() {
+                                    if ui
+                                        .add(theme::segmented_button(lang.label(), current == lang))
+                                        .clicked()
+                                        && current != lang
+                                    {
+                                        self.set_lang(lang);
+                                    }
+                                }
+                            });
                         });
-                    if next != self.lang {
-                        self.set_lang(next);
-                    }
-                    ui.label(egui::RichText::new(self.t("language")).weak().size(13.0));
-                });
-            });
-            ui.add_space(4.0);
-        });
-
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.add(egui::ProgressBar::new(self.progress / 100.0).show_percentage());
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.monospace(format_elapsed(self.current_elapsed()));
-                });
-            });
-            if !self.error.is_empty() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 140, 130),
-                    egui::RichText::new(&self.error).size(13.0),
-                );
-            }
-            if !self.log.is_empty() {
-                egui::ScrollArea::vertical()
-                    .max_height(72.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(&self.log).size(11.0).weak().monospace());
                     });
-            }
-            ui.add_space(4.0);
-        });
+                });
+            });
+
+        egui::Panel::bottom("status")
+            .frame(theme::status_panel())
+            .show(ui, |ui| {
+                ui.scope(|ui| {
+                    ui.spacing_mut().interact_size.y = 4.0;
+                    ui.add(
+                        egui::ProgressBar::new((self.progress / 100.0).clamp(0.0, 1.0))
+                            .fill(theme::ACCENT)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&self.status)
+                            .color(theme::TEXT)
+                            .size(14.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format_elapsed(self.current_elapsed()))
+                                .monospace()
+                                .color(theme::TEXT_SECONDARY)
+                                .size(12.0),
+                        );
+                    });
+                });
+                if !self.error.is_empty() {
+                    ui.colored_label(theme::ERROR, egui::RichText::new(&self.error).size(13.0));
+                }
+                if !self.log.is_empty() {
+                    egui::ScrollArea::vertical()
+                        .max_height(72.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&self.log)
+                                    .size(11.0)
+                                    .color(theme::TEXT_SECONDARY)
+                                    .monospace(),
+                            );
+                        });
+                }
+            });
 
         egui::Panel::left("controls")
             .resizable(true)
-            .default_size(330.0)
+            .default_size(400.0)
+            .min_size(320.0)
+            .max_size(440.0)
+            .show_separator_line(false)
+            .frame(theme::mica_panel())
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.controls(ui, &ctx);
+                let height = ui.available_height();
+                // Leave room for the card's inner margin, stroke and shadow so the
+                // last controls stay inside the rounded card and can scroll.
+                let scroll_h = (height - 48.0).max(64.0);
+                theme::card_frame().show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("controls-scroll")
+                        .auto_shrink([false, false])
+                        .max_height(scroll_h)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.controls(ui, &ctx);
+                        });
                 });
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.preview(ui);
-        });
+        egui::CentralPanel::default()
+            .frame(theme::mica_panel())
+            .show(ui, |ui| {
+                let available = ui.available_size();
+                theme::card_frame().inner_margin(8.0).show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(
+                        (available.x - 24.0).max(64.0),
+                        (available.y - 24.0).max(64.0),
+                    ));
+                    self.preview(ui);
+                });
+            });
+
+        self.tick_screenshot(&ctx);
     }
 }
 
 impl InfScalerApp {
     fn controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.add_space(4.0);
-        ui.label(self.t("photo"));
+        ui.label(theme::subtitle_text(self.t("photo")));
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.running, egui::Button::new(self.t("open")))
+                .add_enabled(!self.running, theme::standard_button(self.t("open")))
                 .clicked()
             {
                 self.pick_input(ctx);
             }
-            ui.label(
-                egui::RichText::new(self.t("or_drop_file"))
-                    .weak()
-                    .size(12.0),
-            );
+            ui.label(theme::caption_text(self.t("or_drop_file")));
         });
         if ui
-            .button(
-                self.batch_output_dir
-                    .as_ref()
-                    .map(|p| self.tr("output_folder", &[&p.display().to_string()]))
-                    .unwrap_or_else(|| self.t("output_folder_auto").to_string()),
+            .add_enabled(
+                !self.running,
+                theme::standard_button(
+                    self.batch_output_dir
+                        .as_ref()
+                        .map(|p| self.tr("output_folder", &[&p.display().to_string()]))
+                        .unwrap_or_else(|| self.t("output_folder_auto").to_string()),
+                ),
             )
             .clicked()
-            && !self.running
         {
             if let Some(path) = rfd::FileDialog::new()
                 .set_title(self.t("choose_output_folder"))
@@ -641,7 +811,10 @@ impl InfScalerApp {
                 .on_hover_text(self.t("threads_hint"));
             ui.add(egui::DragValue::new(&mut self.batch_threads).range(1..=12));
         });
-        if ui.button(self.t("open_folder")).clicked() && !self.running {
+        if ui
+            .add_enabled(!self.running, theme::standard_button(self.t("open_folder")))
+            .clicked()
+        {
             if let Some(folder) = rfd::FileDialog::new()
                 .set_title(self.t("open_image_folder"))
                 .pick_folder()
@@ -653,29 +826,34 @@ impl InfScalerApp {
             }
         }
         ui.label(self.tr("queue_count", &[&self.queued.len().to_string()]));
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("batch-preset")
-                .selected_text(i18n::preset_label(self.lang, &self.batch_preset))
-                .show_ui(ui, |ui| {
-                    for p in ["general", "people", "fast"] {
-                        ui.selectable_value(
-                            &mut self.batch_preset,
-                            p.into(),
-                            i18n::preset_label(self.lang, p),
-                        );
-                    }
-                });
-            egui::ComboBox::from_id_salt("batch-jobs")
-                .selected_text(i18n::jobs_label(self.lang, self.batch_jobs))
-                .show_ui(ui, |ui| {
-                    for n in 1..=3 {
-                        ui.selectable_value(
-                            &mut self.batch_jobs,
-                            n,
+        egui::ComboBox::from_id_salt("batch-preset")
+            .selected_text(i18n::preset_label(self.lang, &self.batch_preset))
+            .width((ui.available_width() - 8.0).max(120.0))
+            .show_ui(ui, |ui| {
+                for p in ["general", "people", "fast"] {
+                    ui.selectable_value(
+                        &mut self.batch_preset,
+                        p.into(),
+                        i18n::preset_label(self.lang, p),
+                    );
+                }
+            });
+        theme::segmented_frame().show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.horizontal(|ui| {
+                for n in 1..=3 {
+                    if ui
+                        .add(theme::segmented_button(
                             i18n::jobs_label(self.lang, n),
-                        );
+                            self.batch_jobs == n,
+                        ))
+                        .clicked()
+                        && !self.running
+                    {
+                        self.batch_jobs = n;
                     }
-                });
+                }
+            });
         });
         if !self.queued.is_empty() {
             egui::ScrollArea::vertical()
@@ -689,25 +867,30 @@ impl InfScalerApp {
                     }
                 });
             if ui
-                .add_enabled(!self.running, egui::Button::new(self.t("process_queued")))
+                .add_enabled(
+                    !self.running,
+                    theme::accent_button(self.t("process_queued")),
+                )
                 .clicked()
             {
                 self.start_batch();
             }
         }
         ui.add_enabled_ui(!self.running, |ui| {
-            ui.add(
+            let response = ui.add(
                 egui::TextEdit::singleline(&mut self.input_path)
                     .hint_text("input.jpg")
                     .desired_width(f32::INFINITY),
             );
+            theme::underline_focus(ui, &response);
         });
         if let Some((w, h)) = self.input_size {
-            ui.label(egui::RichText::new(format!("{w} × {h} px")).weak());
+            ui.label(theme::caption_text(format!("{w} × {h} px")));
         }
 
+        ui.add_space(16.0);
+        ui.label(theme::subtitle_text(self.t("model")));
         ui.add_space(8.0);
-        ui.label(self.t("model"));
         let onnx = self.selected().is_some_and(|m| m.is_onnx());
         let selected_name = if self.model_idx == self.models.len() {
             self.t("auto_choose").to_string()
@@ -750,6 +933,7 @@ impl InfScalerApp {
             egui::CollapsingHeader::new(self.t("technical_details"))
                 .id_salt("tech-auto")
                 .default_open(false)
+                .open(if self.expand_tech { Some(true) } else { None })
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(i18n::t(lang, "tech_auto"))
@@ -761,14 +945,15 @@ impl InfScalerApp {
             let desc = i18n::model_description(lang, &model.name)
                 .unwrap_or_else(|| i18n::t(lang, "desc_custom"));
             let color = if model.is_broken() {
-                egui::Color32::from_rgb(220, 120, 100)
+                theme::ERROR
             } else {
-                ui.visuals().text_color()
+                theme::TEXT_SECONDARY
             };
-            ui.label(egui::RichText::new(desc).size(12.5).color(color));
+            ui.label(egui::RichText::new(desc).size(12.0).color(color));
             egui::CollapsingHeader::new(i18n::t(lang, "technical_details"))
                 .id_salt("tech-model")
                 .default_open(false)
+                .open(if self.expand_tech { Some(true) } else { None })
                 .show(ui, |ui| {
                     let small = |ui: &mut egui::Ui, text: String| {
                         ui.label(egui::RichText::new(text).weak().size(11.5));
@@ -792,45 +977,49 @@ impl InfScalerApp {
                 });
         }
 
+        ui.add_space(16.0);
+        ui.label(theme::subtitle_text(self.t("output_size")));
         ui.add_space(8.0);
-        ui.label(self.t("output_size"));
         ui.add_enabled_ui(!self.running, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(self.keep_size, self.t("original_sharpen"))
-                    .on_hover_text(self.t("original_sharpen_tip"))
-                    .clicked()
-                {
-                    self.keep_size = true;
-                }
-                for value in [2, 3, 4] {
+            theme::segmented_frame().show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(
-                            !self.keep_size && self.scale == value,
-                            format!("{value}×"),
-                        )
+                        .add(theme::segmented_button(
+                            self.t("original_sharpen"),
+                            self.keep_size,
+                        ))
+                        .on_hover_text(self.t("original_sharpen_tip"))
                         .clicked()
                     {
-                        self.keep_size = false;
-                        self.scale = value;
+                        self.keep_size = true;
                     }
-                }
+                    for value in [2, 3, 4] {
+                        if ui
+                            .add(theme::segmented_button(
+                                format!("{value}×"),
+                                !self.keep_size && self.scale == value,
+                            ))
+                            .clicked()
+                        {
+                            self.keep_size = false;
+                            self.scale = value;
+                        }
+                    }
+                });
             });
         });
         let model_scale = self.selected().map(|m| m.scale).unwrap_or(4);
         let hint = if self.keep_size {
-            self.tr("hint_keep_size", &[&model_scale.to_string()])
+            self.t("hint_keep_size").to_string()
         } else if self.scale == model_scale {
-            self.tr("hint_native", &[&model_scale.to_string()])
+            self.tr("hint_native", &[&self.scale.to_string()])
         } else {
-            self.tr(
-                "hint_rescale",
-                &[&model_scale.to_string(), &self.scale.to_string()],
-            )
+            self.tr("hint_rescale", &[&self.scale.to_string()])
         };
-        ui.label(egui::RichText::new(hint).weak().size(12.0));
+        ui.label(theme::caption_text(hint));
 
-        ui.add_space(8.0);
+        ui.add_space(16.0);
         ui.horizontal(|ui| {
             ui.label(self.t("tile"));
             ui.add_enabled(
@@ -839,7 +1028,7 @@ impl InfScalerApp {
                     .range(0..=1024)
                     .speed(16),
             );
-            ui.label(egui::RichText::new(self.t("tile_auto")).weak());
+            ui.label(theme::caption_text(self.t("tile_auto")));
         });
         ui.horizontal(|ui| {
             ui.label(self.t("overlap"));
@@ -849,12 +1038,13 @@ impl InfScalerApp {
                     .range(0..=256)
                     .speed(4),
             );
-            ui.label(egui::RichText::new(self.t("onnx_seams")).weak());
+            ui.label(theme::caption_text(self.t("onnx_seams")));
         });
-        ui.label(egui::RichText::new(self.t("tile_hint")).weak().size(12.0));
+        ui.label(theme::caption_text(self.t("tile_hint")));
 
+        ui.add_space(16.0);
+        ui.label(theme::subtitle_text(self.t("gpu")));
         ui.add_space(8.0);
-        ui.label(self.t("gpu"));
         let gpu_label = self.gpu_label();
         egui::ComboBox::from_id_salt("gpu")
             .selected_text(gpu_label)
@@ -878,11 +1068,7 @@ impl InfScalerApp {
             egui::Checkbox::new(&mut self.tta, tta_label),
         );
         if onnx {
-            ui.label(
-                egui::RichText::new(self.t("tta_onnx_hint"))
-                    .weak()
-                    .size(12.0),
-            );
+            ui.label(theme::caption_text(self.t("tta_onnx_hint")));
         }
         let has_denoise = self.models.iter().any(|m| m.denoise);
         ui.add_enabled(
@@ -907,28 +1093,29 @@ impl InfScalerApp {
             );
         }
 
+        ui.add_space(16.0);
+        ui.label(theme::subtitle_text(self.t("save_as")));
         ui.add_space(8.0);
-        ui.label(self.t("save_as"));
         ui.horizontal(|ui| {
             ui.add_enabled_ui(!self.running, |ui| {
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut self.output_path)
                         .hint_text("enhanced.png")
-                        .desired_width(ui.available_width() - 78.0),
+                        .desired_width((ui.available_width() - 90.0).max(80.0)),
                 );
+                theme::underline_focus(ui, &response);
             });
             if ui
-                .add_enabled(!self.running, egui::Button::new(self.t("browse")))
+                .add_enabled(!self.running, theme::standard_button(self.t("browse")))
                 .clicked()
             {
                 self.pick_output();
             }
         });
         if let Some((w, h)) = self.output_size {
-            ui.label(
-                egui::RichText::new(self.tr("last_result", &[&w.to_string(), &h.to_string()]))
-                    .weak(),
-            );
+            ui.label(theme::caption_text(
+                self.tr("last_result", &[&w.to_string(), &h.to_string()]),
+            ));
         }
 
         ui.add_space(12.0);
@@ -936,11 +1123,11 @@ impl InfScalerApp {
             if let Some(control) = &self.batch_control {
                 let paused = control.paused.load(Ordering::SeqCst);
                 if ui
-                    .button(if paused {
+                    .add(theme::standard_button(if paused {
                         self.t("resume")
                     } else {
                         self.t("pause")
-                    })
+                    }))
                     .clicked()
                 {
                     control.paused.store(!paused, Ordering::SeqCst);
@@ -948,8 +1135,8 @@ impl InfScalerApp {
             }
             if ui
                 .add_sized(
-                    [ui.available_width(), 36.0],
-                    egui::Button::new(self.t("cancel")).fill(egui::Color32::from_rgb(130, 48, 48)),
+                    [ui.available_width(), 32.0],
+                    theme::danger_button(self.t("cancel")),
                 )
                 .clicked()
             {
@@ -963,9 +1150,8 @@ impl InfScalerApp {
             ui.add_enabled_ui(ready, |ui| {
                 if ui
                     .add_sized(
-                        [ui.available_width(), 36.0],
-                        egui::Button::new(self.t("enhance"))
-                            .fill(egui::Color32::from_rgb(32, 110, 186)),
+                        [ui.available_width(), 32.0],
+                        theme::accent_button(self.t("enhance")),
                     )
                     .clicked()
                 {
@@ -977,6 +1163,12 @@ impl InfScalerApp {
             }
         }
         ui.add_space(8.0);
+        if self.scroll_controls {
+            ui.scroll_to_cursor_animation(
+                Some(egui::Align::BOTTOM),
+                egui::style::ScrollAnimation::none(),
+            );
+        }
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
@@ -987,24 +1179,40 @@ impl InfScalerApp {
         let after_id = self.after.as_ref().map(|tex| tex.id());
 
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(18, 18, 20));
+        painter.rect_filled(rect, 8.0, theme::WHITE);
 
         let Some(before_size) = before_size else {
+            let dash = rect.shrink(20.0);
+            theme::dashed_rounded_rect(
+                &painter,
+                dash,
+                8.0,
+                egui::Stroke::new(
+                    1.5,
+                    if self.hovering_file {
+                        theme::ACCENT
+                    } else {
+                        theme::BORDER_DARK
+                    },
+                ),
+            );
+            theme::paint_image_glyph(
+                &painter,
+                dash.center() - egui::vec2(0.0, 28.0),
+                48.0,
+                if self.hovering_file {
+                    theme::ACCENT
+                } else {
+                    theme::TEXT_SECONDARY
+                },
+            );
             painter.text(
-                rect.center(),
+                dash.center() + egui::vec2(0.0, 28.0),
                 egui::Align2::CENTER_CENTER,
                 self.t("drop_here"),
-                egui::FontId::proportional(18.0),
-                egui::Color32::from_rgb(170, 170, 176),
+                egui::FontId::proportional(14.0),
+                theme::TEXT_SECONDARY,
             );
-            if self.hovering_file {
-                painter.rect_stroke(
-                    rect.shrink(8.0),
-                    6.0,
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 150, 230)),
-                    egui::StrokeKind::Inside,
-                );
-            }
             return;
         };
         let Some(before_id) = before_id else { return };
@@ -1097,31 +1305,34 @@ impl InfScalerApp {
                 egui::Stroke::new(2.0, egui::Color32::WHITE),
             );
             painter.circle_filled(egui::pos2(x, visible.center().y), 7.0, egui::Color32::WHITE);
-            paint_tag(
+            theme::pill(
                 &painter,
                 egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
                 self.t("before"),
+                false,
             );
-            paint_tag_right(
+            theme::pill(
                 &painter,
                 egui::pos2(fitted.right() - 8.0, fitted.top() + 8.0),
                 self.t("after"),
+                true,
             );
         } else {
             painter.image(before_id, fitted, uv, egui::Color32::WHITE);
-            paint_tag(
+            theme::pill(
                 &painter,
                 egui::pos2(fitted.left() + 8.0, fitted.top() + 8.0),
                 self.t("original"),
+                false,
             );
         }
 
         if self.hovering_file {
-            painter.rect_stroke(
+            theme::dashed_rounded_rect(
+                &painter,
                 rect.shrink(6.0),
-                6.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 150, 230)),
-                egui::StrokeKind::Inside,
+                8.0,
+                egui::Stroke::new(2.0, theme::ACCENT),
             );
         }
     }
@@ -1141,7 +1352,9 @@ impl InfScalerApp {
         self.status = i18n::localize_runtime(lang, &self.status);
         self.error = i18n::localize_runtime(lang, &self.error);
         self.lang = lang;
-        i18n::save_lang(lang);
+        if self.persist_lang {
+            i18n::save_lang(lang);
+        }
     }
 
     fn gpu_label(&self) -> String {
@@ -1165,55 +1378,6 @@ impl InfScalerApp {
             self.elapsed
         }
     }
-}
-
-fn install_ui_fonts(ctx: &egui::Context) {
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    ];
-    let Some((name, bytes)) = CANDIDATES.iter().find_map(|path| {
-        std::fs::read(path)
-            .ok()
-            .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| {
-                let name = if path.contains("NotoSans") {
-                    "NotoSans"
-                } else {
-                    "DejaVuSans"
-                };
-                (name, bytes)
-            })
-    }) else {
-        return;
-    };
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        name.to_owned(),
-        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-    );
-    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        family.insert(0, name.to_owned());
-    }
-    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-        family.push(name.to_owned());
-    }
-    ctx.set_fonts(fonts);
-}
-
-fn apply_style(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.selection.bg_fill = egui::Color32::from_rgb(36, 102, 176);
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(40, 110, 180);
-    visuals.hyperlink_color = egui::Color32::from_rgb(130, 186, 255);
-    ctx.set_visuals(visuals);
-    ctx.style_mut_of(ctx.theme(), |style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(10.0, 5.0);
-    });
 }
 
 fn load_texture(
@@ -1242,30 +1406,6 @@ fn fit_rect(bounds: egui::Rect, aspect: f32) -> egui::Rect {
     let x = bounds.left() + (bw - w) * 0.5;
     let y = bounds.top() + (bh - h) * 0.5;
     egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
-}
-
-fn paint_tag(painter: &egui::Painter, pos: egui::Pos2, text: &str) {
-    let galley = painter.layout_no_wrap(
-        text.to_string(),
-        egui::FontId::proportional(13.0),
-        egui::Color32::WHITE,
-    );
-    let rect = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(12.0, 6.0));
-    painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(160));
-    painter.galley(pos + egui::vec2(6.0, 3.0), galley, egui::Color32::WHITE);
-}
-
-fn paint_tag_right(painter: &egui::Painter, right_top: egui::Pos2, text: &str) {
-    let galley = painter.layout_no_wrap(
-        text.to_string(),
-        egui::FontId::proportional(13.0),
-        egui::Color32::WHITE,
-    );
-    let size = galley.size() + egui::vec2(12.0, 6.0);
-    let pos = egui::pos2(right_top.x - size.x, right_top.y);
-    let rect = egui::Rect::from_min_size(pos, size);
-    painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(160));
-    painter.galley(pos + egui::vec2(6.0, 3.0), galley, egui::Color32::WHITE);
 }
 
 fn push_log(log: &mut String, line: &str) {

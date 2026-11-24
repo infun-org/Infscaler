@@ -93,6 +93,52 @@ pub struct Cli {
     /// Print installed models and exit.
     #[arg(long)]
     pub list_models: bool,
+
+    /// Hidden: open the GUI, capture a PNG, and exit. For theme review.
+    #[arg(long, hide = true)]
+    pub screenshot: Option<std::path::PathBuf>,
+
+    /// Hidden: photo to load in a --screenshot run.
+    #[arg(long, hide = true)]
+    pub screenshot_input: Option<std::path::PathBuf>,
+
+    /// Hidden: fake "after" image for a --screenshot run.
+    #[arg(long, hide = true)]
+    pub screenshot_after: Option<std::path::PathBuf>,
+
+    /// Hidden: `vi` or `en` for a --screenshot run (does not persist).
+    #[arg(long, hide = true)]
+    pub screenshot_lang: Option<String>,
+
+    /// Hidden: expand technical details in a --screenshot run.
+    #[arg(long, hide = true, default_value_t = false)]
+    pub screenshot_expand: bool,
+
+    /// Hidden: scroll the settings pane to the bottom in a --screenshot run.
+    #[arg(long, hide = true, default_value_t = false)]
+    pub screenshot_scroll: bool,
+}
+
+impl Cli {
+    pub fn screenshot_spec(&self) -> Option<crate::gui::ScreenshotSpec> {
+        let output = self.screenshot.clone()?;
+        let lang = self
+            .screenshot_lang
+            .as_deref()
+            .and_then(|value| match value {
+                "vi" | "vn" | "vi-VN" => Some(crate::i18n::Lang::Vi),
+                "en" | "en-US" | "english" => Some(crate::i18n::Lang::En),
+                _ => None,
+            });
+        Some(crate::gui::ScreenshotSpec {
+            output,
+            input: self.screenshot_input.clone(),
+            after: self.screenshot_after.clone(),
+            lang,
+            expand: self.screenshot_expand,
+            scroll: self.screenshot_scroll,
+        })
+    }
 }
 
 pub fn run(cli: &Cli) -> Result<()> {
@@ -144,8 +190,13 @@ pub fn run(cli: &Cli) -> Result<()> {
         .clone()
         .ok_or_else(|| anyhow!("--output is required in CLI mode"))?;
     let model = cli.model.clone().unwrap_or_else(|| "auto".into());
-    if !matches!(cli.mode.as_str(), "sharpen" | "upscale2" | "upscale3" | "upscale4") {
-        return Err(anyhow!("--mode must be sharpen, upscale2, upscale3, or upscale4"));
+    if !matches!(
+        cli.mode.as_str(),
+        "sharpen" | "upscale2" | "upscale3" | "upscale4"
+    ) {
+        return Err(anyhow!(
+            "--mode must be sharpen, upscale2, upscale3, or upscale4"
+        ));
     }
     if !(0.0..=1.0).contains(&cli.face_strength) {
         return Err(anyhow!("--face-strength must be between 0 and 1"));

@@ -7,6 +7,7 @@ mod i18n;
 mod models;
 mod ort_backend;
 mod paths;
+mod theme;
 mod tile;
 
 use anyhow::anyhow;
@@ -21,7 +22,9 @@ fn main() {
 
 fn dispatch() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
-    if cli.input.is_some() || cli.input_dir.is_some() || cli.list_models {
+    if let Some(spec) = cli.screenshot_spec() {
+        gui::run_screenshot(spec).map_err(|err| anyhow!("{err}"))
+    } else if cli.input.is_some() || cli.input_dir.is_some() || cli.list_models {
         cli::run(&cli)
     } else {
         gui::run().map_err(|err| anyhow!("{err}"))
