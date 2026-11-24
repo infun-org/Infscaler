@@ -466,6 +466,8 @@ impl InfScalerApp {
                 crate::batch::OutputMode::Sharpen
             } else if self.scale == 2 {
                 crate::batch::OutputMode::Upscale2
+            } else if self.scale == 3 {
+                crate::batch::OutputMode::Upscale3
             } else {
                 crate::batch::OutputMode::Upscale4
             },
@@ -746,13 +748,26 @@ impl InfScalerApp {
         }
 
         ui.add_space(8.0);
-        ui.label("Output scale");
-        ui.horizontal(|ui| {
-            for value in [2, 3, 4] {
-                ui.add_enabled_ui(!self.running && !self.keep_size, |ui| {
-                    ui.selectable_value(&mut self.scale, value, format!("{value}×"));
-                });
-            }
+        ui.label("Output size");
+        ui.add_enabled_ui(!self.running, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(self.keep_size, "Original (sharpen)")
+                    .on_hover_text("Recommended: enhance, then scale back to the original pixel size")
+                    .clicked()
+                {
+                    self.keep_size = true;
+                }
+                for value in [2, 3, 4] {
+                    if ui
+                        .selectable_label(!self.keep_size && self.scale == value, format!("{value}×"))
+                        .clicked()
+                    {
+                        self.keep_size = false;
+                        self.scale = value;
+                    }
+                }
+            });
         });
         let model_scale = self.selected().map(|m| m.scale).unwrap_or(4);
         let hint = if self.keep_size {
@@ -824,13 +839,6 @@ impl InfScalerApp {
                 .size(12.0),
             );
         }
-        ui.add_enabled(
-            !self.running,
-            egui::Checkbox::new(
-                &mut self.keep_size,
-                "Sharpen at original size (recommended)",
-            ),
-        );
         let has_denoise = self.models.iter().any(|m| m.denoise);
         ui.add_enabled(
             !self.running && has_denoise,

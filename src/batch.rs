@@ -12,6 +12,7 @@ use crate::engine::{self, JobOptions};
 pub enum OutputMode {
     Sharpen,
     Upscale2,
+    Upscale3,
     Upscale4,
 }
 
@@ -174,7 +175,7 @@ pub fn run(
                     input: input.clone(),
                     output: temp.clone(),
                     model: "auto".into(),
-                    output_scale: if mode == OutputMode::Upscale2 { 2 } else { 4 },
+                    output_scale: match mode { OutputMode::Upscale2 => 2, OutputMode::Upscale3 => 3, _ => 4 },
                     tile: 0,
                     tta: false,
                     keep_size: mode == OutputMode::Sharpen,

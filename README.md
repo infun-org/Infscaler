@@ -139,7 +139,7 @@ TTA is NCNN-only. The official binary is still installed as a fallback if
 | `--output-dir` | Batch destination; defaults to `<input-folder>_infscaler/` |
 | `--jobs` | Batch workers, 1–3 (default 1) |
 | `--threads` | ONNX intra-op thread budget, split across batch workers (default 4) |
-| `--mode` | `sharpen` (default), `upscale2`, or `upscale4`; all use a 4× model |
+| `--mode` | `sharpen` (default), `upscale2`, `upscale3`, or `upscale4`; all use a 4× model |
 | `--preset` | `people` (DAT), `general` (Nomos2 OTF), or `fast` (Nomos8kSC GPU) |
 | `--output` | `.png`, `.jpg`, or `.webp` |
 | `--model` | File stem in `models/`, or `auto` (default) |

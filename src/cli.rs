@@ -100,10 +100,11 @@ pub fn run(cli: &Cli) -> Result<()> {
         let mode = match cli.mode.as_str() {
             "sharpen" => crate::batch::OutputMode::Sharpen,
             "upscale2" => crate::batch::OutputMode::Upscale2,
+            "upscale3" => crate::batch::OutputMode::Upscale3,
             "upscale4" => crate::batch::OutputMode::Upscale4,
             other => {
                 return Err(anyhow!(
-                    "--mode must be sharpen, upscale2, or upscale4 (got {other})"
+                    "--mode must be sharpen, upscale2, upscale3, or upscale4 (got {other})"
                 ))
             }
         };
@@ -143,8 +144,8 @@ pub fn run(cli: &Cli) -> Result<()> {
         .clone()
         .ok_or_else(|| anyhow!("--output is required in CLI mode"))?;
     let model = cli.model.clone().unwrap_or_else(|| "auto".into());
-    if !matches!(cli.mode.as_str(), "sharpen" | "upscale2" | "upscale4") {
-        return Err(anyhow!("--mode must be sharpen, upscale2, or upscale4"));
+    if !matches!(cli.mode.as_str(), "sharpen" | "upscale2" | "upscale3" | "upscale4") {
+        return Err(anyhow!("--mode must be sharpen, upscale2, upscale3, or upscale4"));
     }
     if !(0.0..=1.0).contains(&cli.face_strength) {
         return Err(anyhow!("--face-strength must be between 0 and 1"));
@@ -159,6 +160,7 @@ pub fn run(cli: &Cli) -> Result<()> {
         model: model.clone(),
         output_scale: match cli.mode.as_str() {
             "upscale2" => 2,
+            "upscale3" => 3,
             "upscale4" => 4,
             _ => cli.scale,
         },
