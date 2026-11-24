@@ -983,6 +983,17 @@ impl InfScalerApp {
                 }
             }
         }
+        // At fit size or smaller the image stays pinned to the center. When
+        // zoomed in, keep the pan inside the image so it never drifts away.
+        if self.zoom <= 1.0 {
+            self.pan = egui::Vec2::ZERO;
+        } else {
+            let max = (fitted.size() * self.zoom - fitted.size()) * 0.5;
+            self.pan = egui::vec2(
+                self.pan.x.clamp(-max.x, max.x),
+                self.pan.y.clamp(-max.y, max.y),
+            );
+        }
         let fitted =
             egui::Rect::from_center_size(fitted.center() + self.pan, fitted.size() * self.zoom);
 
@@ -1002,7 +1013,9 @@ impl InfScalerApp {
         if response.dragged_by(egui::PointerButton::Middle)
             || (response.dragged_by(egui::PointerButton::Primary) && !self.dragging_split)
         {
-            self.pan += response.drag_delta();
+            if self.zoom > 1.0 {
+                self.pan += response.drag_delta();
+            }
         } else if response.dragged_by(egui::PointerButton::Primary) && self.dragging_split {
             if let Some(pos) = response.interact_pointer_pos() {
                 if visible.width() > 1.0 {
